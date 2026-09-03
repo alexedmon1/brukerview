@@ -15,8 +15,8 @@ or a hand-filled ImageJ raw-import dialog.
 uv tool install --editable /path/to/brukerview --with nibabel
 # or: pip install -e '/path/to/brukerview[nifti]'
 
-# once the repo has a remote, on any machine with Python 3.9+:
-pip install 'brukerview[nifti] @ git+https://<host>/<org>/brukerview.git'
+# on any machine with Python 3.9+:
+pip install 'brukerview[nifti] @ git+https://github.com/alexedmon1/brukerview.git'
 ```
 
 Requirements: Python 3.9+, numpy, matplotlib (nibabel for NIfTI/FSLeyes).
