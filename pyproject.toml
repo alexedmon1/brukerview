@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brukerview"
+version = "0.1.0"
+description = "Look at Bruker ParaVision images straight from pdata/N/2dseq: listing, slice viewer, NIfTI export, FSLeyes and ImageJ launchers"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["numpy>=1.22", "matplotlib>=3.5"]
+
+[project.optional-dependencies]
+nifti = ["nibabel>=4.0"]
+dev = ["pytest>=7", "nibabel>=4.0"]
+
+[project.scripts]
+brukerview = "brukerview.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["brukerview*"]
+
+[tool.setuptools.package-data]
+brukerview = ["macros/*.ijm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
