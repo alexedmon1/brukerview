@@ -22,29 +22,34 @@ pip install 'brukerview[nifti] @ git+https://github.com/alexedmon1/brukerview.gi
 Requirements: Python 3.9+, numpy, matplotlib (nibabel for NIfTI/FSLeyes).
 The ImageJ macro needs only ImageJ 1.47+ or Fiji, on any OS.
 
+Runs on native Linux, WSL and macOS. The interactive viewer needs a
+matplotlib GUI backend: on a bare Linux install add one with
+`apt install python3-tk` (or `pip install PyQt5`) -- without it `show` says so
+instead of opening nothing, and `--save` still works.
+
 ## Use
 
 ```bash
 # what is in a study? (works on a study folder, a folder of studies, or a scan)
-brukerview list /mnt/e/research/mouse-mri
+brukerview list /data/mouse-mri          # a WSL path like /mnt/e/... works too
 
 # interactive viewer: give a scan folder, a pdata folder, or a study (you get a picker)
-brukerview show /mnt/e/research/mouse-mri/FAC600_.../5
-brukerview /mnt/e/research/mouse-mri/FAC600_.../5          # same thing
+brukerview show /data/mouse-mri/FAC600_.../5
+brukerview /data/mouse-mri/FAC600_.../5          # same thing
 
 # open in FSLeyes (converts to a cached NIfTI in ~/.cache/brukerview)
-brukerview fsleyes /mnt/e/research/mouse-mri/FAC600_.../5
-brukerview fsleyes --all /mnt/e/research/mouse-mri/FAC600_...   # every scan as overlays
+brukerview fsleyes /data/mouse-mri/FAC600_.../5
+brukerview fsleyes --all /data/mouse-mri/FAC600_...   # every scan as overlays
 
-# open in ImageJ (Windows ImageJ/Fiji is auto-detected from WSL)
-brukerview imagej /mnt/e/research/mouse-mri/FAC600_.../5
+# open in ImageJ (a local Linux/macOS Fiji or, under WSL, the Windows one)
+brukerview imagej /data/mouse-mri/FAC600_.../5
 
 # export
-brukerview nifti /mnt/e/research/mouse-mri/FAC600_.../5 -o t2.nii.gz
-brukerview nifti --all /mnt/e/research/mouse-mri/FAC600_... -o nifti_out/
+brukerview nifti /data/mouse-mri/FAC600_.../5 -o t2.nii.gz
+brukerview nifti --all /data/mouse-mri/FAC600_... -o nifti_out/
 
 # parameters
-brukerview info /mnt/e/research/mouse-mri/FAC600_.../5
+brukerview info /data/mouse-mri/FAC600_.../5
 brukerview info ... --param PVM_SpatResol VisuCoreOrientation
 ```
 
@@ -59,9 +64,14 @@ slices, `h` help, `q` close. `--save out.png` writes a snapshot without a window
 dependencies. Install it once:
 
 ```bash
-brukerview install-imagej                        # auto-detects C:\Program Files\ImageJ from WSL
-brukerview install-imagej "/mnt/c/Program Files/ImageJ"
+brukerview install-imagej                        # auto-detects a local install
+brukerview install-imagej ~/bin/ImageJ            # or name the folder
+brukerview install-imagej "/mnt/c/Program Files/ImageJ"   # WSL: the Windows install
 ```
+
+Search order: `--imagej`, `$BRUKERVIEW_IMAGEJ`, `/mnt/c/...` (only under WSL),
+then the usual Linux/macOS spots (`~/Fiji.app`, `/opt/Fiji.app`, `~/bin/ImageJ`,
+`/opt/ImageJ`, `/usr/share/imagej`, `/Applications/...`), then `PATH`.
 
 Then in ImageJ use **Plugins > Import Bruker 2dseq**, point it at a study,
 scan, or `pdata/N` folder, and it opens the image with the right type, matrix,
@@ -79,11 +89,15 @@ the dialog) keeps it closed. Pointed at a study folder it lists the scans with t
 protocol and matrix so you can pick one.
 
 `brukerview imagej SCAN` runs the same macro non-interactively through
-`ImageJ.exe -macro`, so a scan opens in ImageJ straight from the WSL prompt.
+`ImageJ -macro`, so a scan opens in ImageJ straight from the shell. Under WSL
+the Windows `ImageJ.exe` is used and paths are translated with `wslpath`.
 Verified against ImageJ 1.53a on Windows: T2 RARE, MSME (7 slices x 32 echoes),
 3-shell DTI (9 x 75), DTI with 2 repetitions (19 x 95 x 2), 3D FISP, fMRI
 (19 x 210) and a study/zip-wrapper folder; pixel values match the Python
-reader exactly.
+reader exactly. Re-verified on native Linux (ImageJ 1.53t, Pop!_OS) against
+MSME 160x160x5x32: identical pixels, allowing for the +32768 offset ImageJ
+applies to signed 16-bit data (it carries a matching calibration, so measured
+values are unchanged).
 
 The macro header documents three ImageJ macro-language pitfalls (globals need
 `var`, user-function results must go through a variable, `return`/`=` do not
@@ -98,9 +112,12 @@ movie/cycle...). The NIfTI affine comes from `VisuCoreOrientation` /
 
 Spectroscopy (`VisuCoreDim=1`) is listed but not viewable.
 
+A scan directory carries its own `visu_pars` (describing the raw `fid`), so a
+reconstruction is identified by the `2dseq` beside it, not by `visu_pars` alone.
+
 ## Tests
 
 ```bash
 uv run --with pytest --with nibabel pytest
-BRUKERVIEW_TEST_DATA=/mnt/e/research/mouse-mri uv run --with pytest --with nibabel pytest
+BRUKERVIEW_TEST_DATA=/data/mouse-mri uv run --with pytest --with nibabel pytest
 ```

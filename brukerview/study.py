@@ -16,7 +16,9 @@ def _sort_key(p: Path):
 
 
 def is_pdata_dir(p: Path) -> bool:
-    return (p / 'visu_pars').is_file()
+    # A scan directory also carries a visu_pars (describing the raw fid), so the
+    # 2dseq is what actually marks a reconstruction.
+    return (p / 'visu_pars').is_file() and (p / '2dseq').is_file()
 
 
 def is_scan_dir(p: Path) -> bool:

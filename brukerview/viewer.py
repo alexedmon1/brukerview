@@ -9,6 +9,15 @@ import numpy as np
 
 from .reader import BrukerImage
 
+# Every GUI backend is named "...Agg" (TkAgg, QtAgg, WXAgg), so a substring test
+# for "agg" also matches working interactive backends.
+_NON_GUI_BACKENDS = {'agg', 'cairo', 'pdf', 'pgf', 'ps', 'svg', 'template'}
+
+
+def _is_headless(plt) -> bool:
+    return plt.get_backend().lower() in _NON_GUI_BACKENDS
+
+
 HELP = """\
 brukerview keys
   up/down or scroll   slice
@@ -211,13 +220,19 @@ class SliceViewer:
         extra = '   '.join(self.dim_labels[d][self.idx[d]] for d in range(1, len(self.idx)))
         ax.set_title(f'{self.img.title}   {extra}', fontsize=10)
         fig.tight_layout()
-        if 'agg' not in self.plt.get_backend().lower():
+        if not _is_headless(self.plt):
             fig.show()
 
     def savefig(self, path: str, dpi: int = 150):
         self.fig.savefig(path, dpi=dpi)
 
     def run(self):
+        if _is_headless(self.plt):
+            # No GUI backend: plt.show() would return silently and open nothing.
+            raise SystemExit(
+                'matplotlib has no interactive backend, so no window can open.\n'
+                'Install a GUI toolkit (Debian/Ubuntu: apt install python3-tk; '
+                'or pip install PyQt5), or use --save out.png for a snapshot.')
         print(HELP)
         self.plt.show()
 

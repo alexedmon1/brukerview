@@ -86,6 +86,30 @@ def test_synthetic_layout(tmp_path):
     assert np.allclose(ras[0, 0], -2.0) and np.allclose(ras[1, 1], -3.0)
 
 
+def test_scan_level_visu_pars_is_not_a_reconstruction(tmp_path):
+    """ParaVision writes a visu_pars beside the fid too; only pdata/N has a 2dseq."""
+    from brukerview.study import is_pdata_dir, is_scan_dir, resolve_image
+    scan, _ = make_scan(tmp_path)
+    (scan / 'visu_pars').write_text('##TITLE=acquisition visu_pars\n##$VisuCoreDim=2\n##END=\n')
+
+    assert not is_pdata_dir(scan)
+    assert is_scan_dir(scan)
+    img = resolve_image(scan)
+    assert img.pdata_dir == scan / 'pdata' / '1'
+    assert img.is_image and img.shape == (8, 6, 3, 2)
+
+    assert len(find_images(tmp_path)) == 1
+
+
+def test_unreconstructed_pdata_is_skipped(tmp_path):
+    from brukerview.study import pdata_dirs
+    scan, _ = make_scan(tmp_path)
+    empty = scan / 'pdata' / '2'
+    empty.mkdir()
+    (empty / 'visu_pars').write_text('##TITLE=x\n##END=\n')
+    assert [p.name for p in pdata_dirs(scan)] == ['1']
+
+
 def test_find_images(tmp_path):
     make_scan(tmp_path)
     imgs = find_images(tmp_path)

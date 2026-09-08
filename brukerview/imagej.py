@@ -11,13 +11,27 @@ from typing import List, Optional
 MACRO_NAME = 'Import_Bruker_2dseq.ijm'
 MACRO_PATH = Path(__file__).parent / 'macros' / MACRO_NAME
 
-_CANDIDATES = [
+# Only searched under WSL: a dual-boot Linux box can have a Windows partition
+# mounted at /mnt/c too, and a Windows .exe is unusable without wslpath.
+_WSL_CANDIDATES = [
     '/mnt/c/Program Files/ImageJ/ImageJ.exe',
     '/mnt/c/Program Files/Fiji.app/ImageJ-win64.exe',
     '/mnt/c/Fiji.app/ImageJ-win64.exe',
+]
+
+_CANDIDATES = [
+    # native Linux
     '~/Fiji.app/ImageJ-linux64',
     '/opt/Fiji.app/ImageJ-linux64',
+    '/usr/local/Fiji.app/ImageJ-linux64',
+    '~/bin/ImageJ/ImageJ',
+    '~/ImageJ/ImageJ',
+    '/opt/ImageJ/ImageJ',
+    '/usr/local/ImageJ/ImageJ',
+    '/usr/share/imagej/ImageJ',
+    # macOS
     '/Applications/Fiji.app/Contents/MacOS/ImageJ-macosx',
+    '/Applications/ImageJ.app/Contents/MacOS/ImageJ',
 ]
 
 
@@ -35,6 +49,8 @@ def find_imagej(explicit: Optional[str] = None) -> Optional[Path]:
         candidates.append(explicit)
     if os.environ.get('BRUKERVIEW_IMAGEJ'):
         candidates.append(os.environ['BRUKERVIEW_IMAGEJ'])
+    if is_wsl():
+        candidates += _WSL_CANDIDATES
     candidates += _CANDIDATES
     for c in candidates:
         p = Path(c).expanduser()
