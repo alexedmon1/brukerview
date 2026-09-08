@@ -8,9 +8,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional, Union
 
 from . import __version__
+from .nifti import NiftiImage, find_niftis, is_nifti_path
 from .reader import BrukerImage
 from .study import find_images, resolve_image, is_pdata_dir, is_scan_dir
 
@@ -19,7 +20,7 @@ COLUMNS = [('scan', 'scan'), ('proc', 'p'), ('protocol', 'protocol'), ('method',
            ('voxel_mm', 'voxel (mm)'), ('TE_ms', 'TE ms'), ('TR_ms', 'TR ms')]
 
 
-def format_table(images: List[BrukerImage], with_path: bool = False) -> str:
+def format_table(images: List[Any], with_path: bool = False) -> str:
     cols = COLUMNS + ([('path', 'path')] if with_path else [])
     rows = [img.summary() for img in images]
     widths = {k: max(len(h), *(len(str(r[k])) for r in rows)) for k, h in cols}
@@ -30,7 +31,7 @@ def format_table(images: List[BrukerImage], with_path: bool = False) -> str:
     return '\n'.join(lines)
 
 
-def _pick(images: List[BrukerImage], what: str) -> BrukerImage:
+def _pick(images: List[Any], what: str) -> Any:
     """Choose one reconstruction from several, interactively if possible."""
     if len(images) == 1:
         return images[0]
@@ -50,26 +51,44 @@ def _pick(images: List[BrukerImage], what: str) -> BrukerImage:
             print('ambiguous: ' + ', '.join(m.scan_name for m in matches))
 
 
-def _select(path: str, proc: Optional[str]) -> BrukerImage:
+def _target(path: str) -> Path:
     p = Path(path).expanduser()
+    if not p.exists():
+        sys.exit(f'{path}: no such file or directory')
+    return p
+
+
+def _select(path: str, proc: Optional[str], reorient: bool = True) -> Union[BrukerImage, NiftiImage]:
+    p = _target(path)
+    if p.is_file() and is_nifti_path(p):
+        return NiftiImage(p, reorient=reorient)
     if p.is_file():
         p = p.parent
     if is_pdata_dir(p) or is_scan_dir(p):
         return resolve_image(p, proc)
     images = [i for i in find_images(p) if i.is_image]
+    images += find_niftis(p, reorient=reorient)
     if not images:
-        sys.exit(f'{path}: no Bruker image reconstructions found')
+        sys.exit(f'{path}: no Bruker image reconstructions or NIfTI files found')
     img = _pick(images, path)
-    if proc is not None:
+    if proc is not None and isinstance(img, BrukerImage):
         img = BrukerImage(img.scan_dir / 'pdata' / str(proc))
     return img
 
 
+def _reorient(args) -> bool:
+    """Subcommands that read pixel data offer --no-reorient; others do not."""
+    return not getattr(args, 'no_reorient', False)
+
+
 # ---- subcommands -------------------------------------------------------------------
 def cmd_list(args):
-    images = find_images(args.path, all_procs=args.all_procs)
+    p = _target(args.path)
+    single_nifti = p.is_file() and is_nifti_path(p)
+    images = [] if single_nifti else find_images(args.path, all_procs=args.all_procs)
+    images += find_niftis(p)
     if not images:
-        sys.exit(f'{args.path}: no Bruker scans found')
+        sys.exit(f'{args.path}: no Bruker scans or NIfTI files found')
     if args.csv:
         import csv
         w = csv.DictWriter(sys.stdout, fieldnames=list(images[0].summary().keys()))
@@ -81,9 +100,9 @@ def cmd_list(args):
 
 
 def cmd_show(args):
-    img = _select(args.path, args.proc)
+    img = _select(args.path, args.proc, _reorient(args))
     if not img.is_image:
-        sys.exit(f'{img.pdata_dir}: not an image (VisuCoreDim={img.dim}); spectroscopy is not supported')
+        sys.exit(f'{img.pdata_dir}: not an image (dim={img.dim}); spectroscopy is not supported')
     if args.save:
         import matplotlib
         matplotlib.use('Agg')
@@ -108,7 +127,7 @@ def cmd_show(args):
 
 
 def cmd_info(args):
-    img = _select(args.path, args.proc)
+    img = _select(args.path, args.proc, _reorient(args))
     if args.param:
         for key in args.param:
             src = img.visu if key in img.visu else img.method_params
@@ -121,6 +140,7 @@ def cmd_info(args):
     print(f'  {"subject":10s} {img.subject_id}')
     print(f'  {"study":10s} {img.study_id}')
     print(f'  {"scan time":10s} {img.scan_time_s or 0:.0f} s')
+    print(f'  {"orient":10s} {img.orientation_label}')
     print(f'  {"groups":10s} {[(g.size, g.name) for g in img.frame_groups]}')
     if img.is_image:
         print(f'  {"shape":10s} {img.shape}  (nx, ny, nz, ...)')
@@ -160,10 +180,14 @@ def cmd_fsleyes(args):
         sys.exit('fsleyes not found on PATH')
     if args.all:
         images = [i for i in find_images(args.path, all_procs=args.all_procs) if i.is_image]
+        images += find_niftis(args.path)
     else:
         images = [_select(args.path, args.proc)]
     files = []
     for img in images:
+        if isinstance(img, NiftiImage):
+            files.append(str(img.path))
+            continue
         out = _cache_dir() / f'{img.study_id[:20].replace(" ", "_").replace(":", "")}_{default_name(img)}'
         if not out.exists() or out.stat().st_mtime < img.data_path.stat().st_mtime:
             to_nifti(img, out, scaled=not args.raw)
@@ -175,6 +199,8 @@ def cmd_fsleyes(args):
 def cmd_imagej(args):
     from .imagej import launch, find_imagej
     img = _select(args.path, args.proc)
+    if isinstance(img, NiftiImage):
+        sys.exit(f'{img.path}: the ImageJ macro imports 2dseq only; try `brukerview show` or `fsleyes`')
     exe = find_imagej(args.imagej)
     cmd = launch(img.pdata_dir, exe, raw=args.raw, bc=not args.no_bc)
     print(' '.join(cmd))
@@ -192,17 +218,24 @@ def cmd_install_imagej(args):
 # ---- parser --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='brukerview',
-                                description='View Bruker ParaVision images straight from pdata/N/2dseq.')
+                                description='View Bruker ParaVision images straight from '
+                                            'pdata/N/2dseq, and NIfTI files the same way.')
     p.add_argument('--version', action='version', version=__version__)
     sub = p.add_subparsers(dest='command')
 
     def add_target(sp, proc=True):
-        sp.add_argument('path', help='study, scan, or pdata directory')
+        sp.add_argument('path', help='study, scan or pdata directory, or a .nii/.nii.gz file')
         if proc:
             sp.add_argument('-p', '--proc', help='pdata number (default: first)')
 
-    sp = sub.add_parser('list', help='table of scans in a study (or folder of studies)')
-    sp.add_argument('path')
+    def add_reorient(sp):
+        sp.add_argument('--no-reorient', action='store_true',
+                        help='NIfTI only: keep the file\'s own axis order instead of '
+                             'matching Bruker display orientation')
+
+    sp = sub.add_parser('list', help='table of scans in a study (or folder of studies) '
+                                     'and any NIfTI files found')
+    sp.add_argument('path', help='study, folder of studies, or a folder with NIfTI files')
     sp.add_argument('--all-procs', action='store_true', help='list every pdata, not just the first')
     sp.add_argument('--paths', action='store_true', help='include the pdata path column')
     sp.add_argument('--csv', action='store_true')
@@ -210,21 +243,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser('show', help='interactive slice viewer (default command)')
     add_target(sp)
-    sp.add_argument('--raw', action='store_true', help='do not apply VisuCoreDataSlope/Offs')
+    sp.add_argument('--raw', action='store_true', help='do not apply intensity scaling '
+                    '(Bruker VisuCoreDataSlope/Offs, NIfTI scl_slope/inter)')
     sp.add_argument('--cmap', default='gray')
     sp.add_argument('--range', nargs=2, type=float, metavar=('LO', 'HI'), help='fixed display range')
     sp.add_argument('--slice', type=int, help='initial slice (1-based)')
     sp.add_argument('--frame', type=int, help='initial index of the 4th dimension (1-based)')
     sp.add_argument('--montage', action='store_true', help='also open a montage of all slices')
     sp.add_argument('--save', metavar='PNG', help='write a snapshot instead of opening a window')
+    add_reorient(sp)
     sp.set_defaults(func=cmd_show)
 
-    sp = sub.add_parser('info', help='key parameters of one reconstruction')
+    sp = sub.add_parser('info', help='key parameters of one reconstruction or NIfTI file')
     add_target(sp)
-    sp.add_argument('--param', nargs='+', metavar='KEY', help='print specific visu_pars/method keys')
+    sp.add_argument('--param', nargs='+', metavar='KEY',
+                    help='print specific visu_pars/method keys (NIfTI: header fields)')
+    add_reorient(sp)
     sp.set_defaults(func=cmd_info)
 
-    sp = sub.add_parser('nifti', help='export to NIfTI (needs nibabel)')
+    sp = sub.add_parser('nifti', help='export a Bruker scan to NIfTI (needs nibabel)')
     add_target(sp)
     sp.add_argument('-o', '--output', help='output file, or directory with --all')
     sp.add_argument('--all', action='store_true', help='convert every image scan under PATH')
@@ -232,7 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--raw', action='store_true', help='keep stored integers, no intensity scaling')
     sp.set_defaults(func=cmd_nifti)
 
-    sp = sub.add_parser('fsleyes', help='convert to a cached NIfTI and open in FSLeyes')
+    sp = sub.add_parser('fsleyes', help='open in FSLeyes (Bruker scans via a cached NIfTI, '
+                                        'NIfTI files directly)')
     add_target(sp)
     sp.add_argument('--all', action='store_true', help='load every image scan under PATH')
     sp.add_argument('--all-procs', action='store_true')
@@ -257,9 +295,10 @@ def main(argv: Optional[List[str]] = None):
     parser = build_parser()
     known = {'list', 'show', 'info', 'nifti', 'fsleyes', 'imagej', 'install-imagej'}
     if argv and argv[0] not in known and not argv[0].startswith('-'):
-        # `brukerview PATH` -> list for a study, show for a scan
+        # `brukerview PATH` -> list for a study, show for a scan or a NIfTI file
         p = Path(argv[0]).expanduser()
-        argv.insert(0, 'show' if (is_pdata_dir(p) or is_scan_dir(p)) else 'list')
+        single = is_pdata_dir(p) or is_scan_dir(p) or (p.is_file() and is_nifti_path(p))
+        argv.insert(0, 'show' if single else 'list')
     args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()

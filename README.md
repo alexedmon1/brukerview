@@ -8,6 +8,10 @@ layout, voxel size, intensity scaling, geometry). `brukerview` reads those two
 files directly, so viewing a scan is one command instead of a conversion step
 or a hand-filled ImageJ raw-import dialog.
 
+`.nii`/`.nii.gz` files work the same way -- same `list`, `show`, `info` and
+viewer keys -- so a scan and its converted or processed version can be compared
+without switching tools.
+
 ## Install
 
 ```bash
@@ -19,7 +23,8 @@ uv tool install --editable /path/to/brukerview --with nibabel
 pip install 'brukerview[nifti] @ git+https://github.com/alexedmon1/brukerview.git'
 ```
 
-Requirements: Python 3.9+, numpy, matplotlib (nibabel for NIfTI/FSLeyes).
+Requirements: Python 3.9+, numpy, matplotlib (nibabel for anything NIfTI:
+viewing `.nii` files, export, FSLeyes).
 The ImageJ macro needs only ImageJ 1.47+ or Fiji, on any OS.
 
 Runs on native Linux, WSL and macOS. The interactive viewer needs a
@@ -52,6 +57,30 @@ brukerview nifti --all /data/mouse-mri/FAC600_... -o nifti_out/
 brukerview info /data/mouse-mri/FAC600_.../5
 brukerview info ... --param PVM_SpatResol VisuCoreOrientation
 ```
+
+### NIfTI files
+
+Give any of the commands a `.nii`/`.nii.gz` file, or a folder holding some:
+
+```bash
+brukerview t2.nii.gz                     # same viewer, same keys
+brukerview list nifti_out/               # scans and NIfTI files in one table
+brukerview list /data/study              # Bruker scans plus any .nii.gz beside them
+brukerview info fmri.nii --param pixdim descrip     # header fields
+brukerview fsleyes t2.nii.gz             # opened directly, no conversion
+```
+
+Arrays are reordered so the first axis runs to the patient's left, the second
+posterior and the third superior -- how Bruker stores an axial slice package --
+so on-screen orientation, left/right handedness and the montage layout match
+what `show` does for a 2dseq. `--no-reorient` (on `show` and `info`) keeps the
+file's own axis order; `info` prints the resulting axis codes as `orient`.
+
+The 4th dimension is treated like a Bruker frame group, so left/right steps
+through volumes and the title shows `t = ... s` when the header carries a
+repetition time. `--raw` skips `scl_slope`/`scl_inter` the way it skips
+`VisuCoreDataSlope` for a 2dseq. `imagej` stays Bruker-only: its macro imports
+2dseq.
 
 Viewer keys: up/down or mouse wheel for slices, left/right for the next
 dimension (echo, diffusion direction, time point), `[`/`]` for a third,
@@ -104,6 +133,10 @@ The macro header documents three ImageJ macro-language pitfalls (globals need
 parse comparisons) that matter if you edit it.
 
 ## Data layout
+
+`NiftiImage` exposes the same interface as `BrukerImage` (`load`, `spacing`,
+`shape`, `extra_groups`, `summary`, `nifti_affine`), which is why the viewer,
+`list` and `info` need no format-specific code.
 
 `BrukerImage.load()` returns `(nx, ny, nz, *extra)` where the extra axes are the
 non-slice frame groups from `VisuFGOrderDesc` in file order (echo, diffusion,
