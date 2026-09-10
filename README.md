@@ -25,7 +25,9 @@ pip install 'brukerview[nifti] @ git+https://github.com/alexedmon1/brukerview.gi
 
 Requirements: Python 3.9+, numpy, matplotlib (nibabel for anything NIfTI:
 viewing `.nii` files, export, FSLeyes).
-The ImageJ macro needs only ImageJ 1.47+ or Fiji, on any OS.
+Optional, for `imagej` and `install-imagej`: ImageJ 1.47+ or Fiji, installed
+separately (it is an application, not a Python package, so pip does not pull
+it in). The macro itself runs on any OS with no other dependencies.
 
 Runs on native Linux, WSL and macOS. The interactive viewer needs a
 matplotlib GUI backend: on a bare Linux install add one with
