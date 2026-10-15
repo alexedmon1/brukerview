@@ -12,19 +12,28 @@ or a hand-filled ImageJ raw-import dialog.
 viewer keys -- so a scan and its converted or processed version can be compared
 without switching tools.
 
+Beyond viewing: play any dimension as a movie (or write it to GIF/MP4), export
+to NIfTI, open in FSLeyes or ImageJ, and `brukerview qc` writes an image-quality
+report for a whole study (SNR, tSNR, ghosting, coverage, distortion, shim) for
+comparing protocols.
+
 ## Install
 
 ```bash
 # from a clone (editable, so edits to the macro or code take effect immediately)
-uv tool install --editable /path/to/brukerview --with nibabel
-# or: pip install -e '/path/to/brukerview[nifti]'
+uv tool install --editable /path/to/brukerview --with nibabel --with scipy
+# or: pip install -e '/path/to/brukerview[nifti,qc]'
 
 # on any machine with Python 3.9+:
-pip install 'brukerview[nifti] @ git+https://github.com/alexedmon1/brukerview.git'
+pip install 'brukerview[nifti,qc] @ git+https://github.com/alexedmon1/brukerview.git'
 ```
 
 Requirements: Python 3.9+, numpy, matplotlib (nibabel for anything NIfTI:
-viewing `.nii` files, export, FSLeyes).
+viewing `.nii` files, export, FSLeyes). Extras: `nifti` = nibabel; `qc` =
+nibabel + scipy, for `brukerview qc`. GIF movies need nothing more (Pillow comes
+with matplotlib); MP4 movies need `ffmpeg` on `PATH`. `qc` uses FSL `bet2` for
+the brain-mask hull when it is installed (`$FSLDIR` or `PATH`) and falls back to
+a simpler mask without it.
 Optional, for `imagej` and `install-imagej`: ImageJ 1.47+ or Fiji, installed
 separately (it is an application, not a Python package, so pip does not pull
 it in). The macro itself runs on any OS with no other dependencies.
@@ -52,12 +61,42 @@ brukerview fsleyes --all /data/mouse-mri/FAC600_...   # every scan as overlays
 brukerview imagej /data/mouse-mri/FAC600_.../5
 
 # export
-brukerview nifti /data/mouse-mri/FAC600_.../5 -o t2.nii.gz
+brukerview nifti /data/mouse-mri/FAC600_.../5 -o t2.nii.gz      # -o ending .nii/.nii.gz: a file
+brukerview nifti /data/mouse-mri/FAC600_.../5 -o nifti_out/     # anything else: a folder (created)
 brukerview nifti --all /data/mouse-mri/FAC600_... -o nifti_out/
 
 # parameters
 brukerview info /data/mouse-mri/FAC600_.../5
 brukerview info ... --param PVM_SpatResol VisuCoreOrientation
+
+# movie of a time series, as a window or a file
+brukerview show /data/mouse-mri/FAC600_.../60 --play
+brukerview show /data/mouse-mri/FAC600_.../60 --movie bold.gif
+
+# image-quality report for a whole study
+brukerview qc /data/mouse-mri/FAC600_... -o qc_out/
+```
+
+### Viewer keys and movies
+
+Up/down or mouse wheel for slices, left/right for the next
+dimension (echo, diffusion direction, time point), `[`/`]` for a third,
+right-drag for window/level, `a` auto-contrast, `r` reset, `m` montage of all
+slices, `space` play/pause a movie, `d` choose what the movie steps through
+(slice, echo, diffusion direction, time), `+`/`-` faster/slower, `h` help,
+`q` close. `--save out.png` writes a snapshot without a window.
+
+Movies loop through one dimension while the others stay where they are. The
+default is the longest non-slice dimension: time for BOLD, directions for DTI,
+echoes for MSME. Images with no other dimension play through their slices.
+`--movie-dim` takes `slice`, a frame-group name (`echo`, `diffusion`, `cycle`)
+or `time`. Movies work the same for NIfTI files, where the 4th dimension plays.
+
+```bash
+brukerview show .../60 --play                         # open and start playing
+brukerview show .../60 --play --fps 20 --movie-dim slice
+brukerview show .../60 --slice 5 --movie bold.gif     # write a GIF, no window
+brukerview show .../13 --slice 6 --movie dti.mp4      # MP4 needs ffmpeg on PATH
 ```
 
 ### NIfTI files
@@ -84,24 +123,6 @@ repetition time. `--raw` skips `scl_slope`/`scl_inter` the way it skips
 `VisuCoreDataSlope` for a 2dseq. `imagej` stays Bruker-only: its macro imports
 2dseq.
 
-Viewer keys: up/down or mouse wheel for slices, left/right for the next
-dimension (echo, diffusion direction, time point), `[`/`]` for a third,
-right-drag for window/level, `a` auto-contrast, `r` reset, `m` montage of all
-slices, `space` play/pause a movie, `d` choose what the movie steps through
-(slice, echo, diffusion direction, time), `+`/`-` faster/slower, `h` help,
-`q` close. `--save out.png` writes a snapshot without a window.
-
-Movies loop through one dimension while the others stay where they are. The
-default is the longest non-slice dimension: time for BOLD, directions for DTI,
-echoes for MSME. Images with no other dimension play through their slices.
-
-```bash
-brukerview show .../60 --play                         # open and start playing
-brukerview show .../60 --play --fps 20 --movie-dim slice
-brukerview show .../60 --slice 5 --movie bold.gif     # write a GIF, no window
-brukerview show .../13 --slice 6 --movie dti.mp4      # MP4 needs ffmpeg on PATH
-```
-
 ## Acquisition QA/QC report
 
 `brukerview qc` measures image quality for every scan of a study and writes a
@@ -109,13 +130,15 @@ self-contained HTML report for comparing protocols, for example in a pilot
 session where parameters are being tuned.
 
 ```bash
-uv tool install --editable /path/to/brukerview --with nibabel --with scipy
-# or: pip install -e '/path/to/brukerview[qc]'
-
 brukerview qc /path/to/STUDY_FOLDER -o qc_out/
 brukerview qc STUDY -o qc_out/ --notes interpretation.md   # your own notes in the summary
 brukerview qc STUDY -o qc_out/ --brain-mask edited_mask.nii.gz
+brukerview qc STUDY -o qc_out/ --reference 20 --scans 13 16 60   # mask from E20, analyse 3 scans
+brukerview qc STUDY -o qc_out/ --proc 2                             # measure pdata/2 instead of pdata/1
 ```
+
+The input is a Bruker study folder (the one holding the numbered scans); `qc`
+reads `2dseq` and the parameter files directly, so it does not take NIfTI files.
 
 It writes `report.html` (tables, interactive SVG charts with hover values,
 image montages, methods), `qc_metrics.tsv` (one row per analysed scan),
@@ -123,19 +146,22 @@ image montages, methods), `qc_metrics.tsv` (one row per analysed scan),
 
 | Scans | Metrics |
 |---|---|
-| all | role (anatomical / DWI / SE-EPI reference / BOLD / field map / MRS / localizer / EPI adjustment), protocol parameters with the differing ones highlighted |
+| all | role (anatomical / DWI / SE-EPI reference / single-volume EPI / BOLD / field map / MRS / localizer / EPI adjustment), protocol parameters with the differing ones highlighted |
 | anatomical | SNR, CSF–tissue CNR, SNR per √min and per nL·√min |
 | DTI-EPI | single-image SNR per shell (two-repetition difference method), FA/MD (tensor fit on b ≤ 1000) |
 | BOLD | tSNR (detrended), single-image SNR (consecutive-volume difference), tSNR per √TR<sub>vol</sub> and per nL, drift, steady state; slice-thickness sweeps are detected and plotted |
 | all EPI | Nyquist/segment ghost %, brain coverage, displacement predicted from the B0 map (Δf·FOV<sub>PE</sub>/`PVM_EpiEffBandwidth`) |
 | field maps / PRESS | ΔB0 spread in the brain; water linewidth |
 
-The brain mask comes from the finest 3-D RARE (FSL `bet2` hull plus intensity
-refinement; `--no-bet` skips FSL). It is moved into every other scan through
+The brain mask comes from the finest 3-D RARE, or the scan given with
+`--reference` (FSL `bet2` hull plus intensity refinement; `--no-bet` skips FSL). It is moved into every other scan through
 the `visu_pars` geometry, with no registration. Noise comes from repeated
 acquisitions where they exist. Otherwise it comes from air around the head or,
 in a tight FOV, from air pockets inside it, and only when that region's
-mean/SD shows it contains pure noise. See the report's Methods section.
+mean/SD shows it contains pure noise. A single-volume EPI counts as a topup
+reference only if it is spin echo or acquired with reversed phase encoding.
+Field maps are read from the reconstruction stored in Hz. See the report's
+Methods section.
 
 ## ImageJ macro
 
@@ -157,7 +183,11 @@ scan, or `pdata/N` folder, and it opens the image with the right type, matrix,
 voxel size and a hyperstack laid out as slices (z) x echoes/diffusion/time (t)
 (a third frame group, e.g. repetitions of a DTI, goes to channels).
 Intensity scaling to 32-bit is optional (checkbox). The scan parameters land in
-**Image > Show Info**.
+**Image > Show Info**. The macro and the Python reader share their rules:
+`VisuCoreDataSlope`/`Offs` may hold one value, one per frame or one per slice
+(any other length is refused), slices stored in reverse order
+(`disk_reverse_slice_order`) are put back in order, and 8-bit signed data is
+supported.
 
 Display: the range is set from the whole stack's histogram (0.35% saturated),
 small windows are zoomed up, and the Brightness/Contrast panel opens alongside
@@ -172,11 +202,17 @@ protocol and matrix so you can pick one.
 the Windows `ImageJ.exe` is used and paths are translated with `wslpath`.
 Verified against ImageJ 1.53a on Windows: T2 RARE, MSME (7 slices x 32 echoes),
 3-shell DTI (9 x 75), DTI with 2 repetitions (19 x 95 x 2), 3D FISP, fMRI
-(19 x 210) and a study/zip-wrapper folder; pixel values match the Python
-reader exactly. Re-verified on native Linux (ImageJ 1.53t, Pop!_OS) against
-MSME 160x160x5x32: identical pixels, allowing for the +32768 offset ImageJ
-applies to signed 16-bit data (it carries a matching calibration, so measured
-values are unchanged).
+(19 x 210) and a study/zip-wrapper folder. Re-verified on native Linux
+(ImageJ 1.53t, Pop!_OS) against MSME 160x160x5x32: identical pixels, allowing
+for the +32768 offset ImageJ applies to signed 16-bit data (it carries a
+matching calibration, so measured values are unchanged).
+
+Scaled imports used to differ from Python by about 1e-4: the macro passed the
+slope to *Multiply* as a short string (0.04073596 became 0.04074). Since
+October 2026 it is passed at full precision. Re-checked headless (Windows ImageJ
+under WSL) on 3-D RARE, field map, BOLD, 3-group DTI and MSME scans: scaled
+values match the Python reader to 1e-11 or better (5e-7 for a 32-bit field
+map), and raw values to the +32768 offset above.
 
 The macro header documents three ImageJ macro-language pitfalls (globals need
 `var`, user-function results must go through a variable, `return`/`=` do not
@@ -193,7 +229,24 @@ non-slice frame groups from `VisuFGOrderDesc` in file order (echo, diffusion,
 movie/cycle...). The NIfTI affine comes from `VisuCoreOrientation` /
 `VisuCorePosition` (DICOM-style patient coordinates) and is flipped to RAS.
 
-Spectroscopy (`VisuCoreDim=1`) is listed but not viewable.
+Time labels (`t = ... s`) for a Bruker repetition axis use scan time /
+repetitions, which is the true time per volume (`reader.time_per_repetition`,
+also used by `qc`). ParaVision's scan time excludes dummy scans and includes
+averages. The TR alone would be off by the number of shots for segmented EPI.
+
+With `disk_reverse_slice_order` the array is flipped so slices run in order,
+and the affine is flipped with it, so exported NIfTIs, FSLeyes and `qc` see the
+same voxels at the same positions.
+
+`--all` on a directory means everything under it. On a single file it means
+that file only.
+
+Spectroscopy (`VisuCoreDim=1`) is listed but not viewable (`qc` reads it
+separately, for the water linewidth).
+
+The QC code lives in `brukerview/qc/`: `scans` (inventory, roles, parameters),
+`geometry` (world-space resampling, masks), `metrics`, `dwi`, `fieldmap`, `mrs`,
+`analyze` (runs them per scan), and `charts`/`figures`/`report` for the HTML.
 
 A scan directory carries its own `visu_pars` (describing the raw `fid`), so a
 reconstruction is identified by the `2dseq` beside it, not by `visu_pars` alone.
@@ -201,6 +254,12 @@ reconstruction is identified by the `2dseq` beside it, not by `visu_pars` alone.
 ## Tests
 
 ```bash
-uv run --with pytest --with nibabel pytest
-BRUKERVIEW_TEST_DATA=/data/mouse-mri uv run --with pytest --with nibabel pytest
+uv run --extra dev pytest          # pytest + nibabel + scipy; QC tests skip without scipy
+BRUKERVIEW_TEST_DATA=/data/mouse-mri uv run --extra dev pytest
+
+# also run the ImageJ macro for real and compare it with the Python reader
+# pixel for pixel (slice order, slope rules and precision, 8-bit signed)
+BRUKERVIEW_IMAGEJ_TESTS=1 uv run --extra dev pytest tests/test_slice_order_scaling.py
+# under WSL with the Windows ImageJ, put the test data on a Windows drive:
+BRUKERVIEW_IMAGEJ_TESTS=1 BRUKERVIEW_IMAGEJ_TMP=/mnt/d/tmp uv run --extra dev pytest tests/test_slice_order_scaling.py
 ```
