@@ -14,8 +14,8 @@ from ..reader import BrukerImage
 from . import dwi as dwi_mod
 from . import mrs as mrs_mod
 from .fieldmap import b0_stats, predicted_distortion
-from .geometry import (brain_center_world, brain_mask_t2, object_mask, resample_mask,
-                       slab_coverage)
+from .geometry import (brain_center_world, brain_mask_t2, fill_holes_2d, object_mask,
+                       resample_mask, slab_coverage)
 from .metrics import (BG_RATIO_VALID, background_mask, csf_contrast, drift_percent_per_min, dvars,
                       ghost_ratio, ghost_regions, sigma_air_pockets, sigma_laplacian, snr_background,
                       snr_consecutive, snr_efficiency, summarize, tsnr_map)
@@ -106,7 +106,10 @@ def build_reference(scan: Scan, mask_path: Optional[Path] = None, use_bet: bool 
 def load_fieldmap(scan: Scan) -> FieldMap:
     img = _image(scan)
     hz = img.load().astype(np.float32)
-    support = ndi.binary_erosion(hz != 0, iterations=1)
+    # ParaVision zeroes the map outside the object. Exactly 0 Hz inside it is a
+    # real, on-resonance value, so fill the object's holes instead of dropping
+    # every zero (and do not erode, which would grow each hole).
+    support = fill_holes_2d(ndi.binary_fill_holes(hz != 0)) & np.isfinite(hz)
     return FieldMap(scan, hz, img.nifti_affine(), support)
 
 
@@ -180,33 +183,36 @@ def analyze_anat(scan: Scan, ref: Reference) -> Result:
 def analyze_dwi(scan: Scan, ref: Reference, fmap: Optional[FieldMap]) -> Result:
     res = Result(scan)
     img = _image(scan)
-    data = img.load()  # (x, y, z, n_diff, n_rep)
-    if data.ndim == 4:
-        data = data[..., None]
-    aff = img.nifti_affine()
     shells = dwi_mod.shell_labels(scan.method)
+    # (x, y, z, n_diff, n_rep) whatever order the frame groups were stored in
+    data = dwi_mod.arrange(img.load(), [g.label for g in img.extra_groups], len(shells))
+    aff = img.nifti_affine()
     brain, core = brain_masks(ref, aff, data.shape[:3], two_d=True)
     avg = data.mean(axis=-1)
-    b0 = avg[..., shells == 0].mean(axis=-1)
+    has_b0 = bool((shells == 0).any())
+    # geometry/ghosting/figures use the b0, or the mean DWI if there is none
+    b0 = avg[..., shells == 0].mean(axis=-1) if has_b0 else avg.mean(axis=-1)
     m = res.metrics
     if data.shape[-1] >= 2:
         rows = dwi_mod.shell_snr(data, shells, core)
         res.arrays['shell_snr'] = rows
         for r in rows:
             m[f"snr_b{int(r['b'])}"] = r['snr']
-        b0r = next(r for r in rows if r['b'] == 0)
-        m['snr_b0'] = b0r['snr']
-        m['sigma_diff'] = b0r['sigma']
+        if has_b0:
+            b0r = next(r for r in rows if r['b'] == 0)
+            m['sigma_diff'] = b0r['sigma']
     obj = _epi_geometry(res, img, b0, brain, core, ref, fmap)
-    gr = ghost_regions(obj, scan.params['pe_axis'], scan.params.get('epi_shots') or 1) \
-        if scan.params.get('pe_axis') is not None else None
-    bg = background_mask(data[..., int(np.flatnonzero(shells == 0)[0]), 0], obj, margin=4,
-                         exclude=ndi.binary_dilation(gr, iterations=2) if gr is not None else None)
-    m['snr_b0_bg'] = snr_background(data[..., int(np.flatnonzero(shells == 0)[0]), 0], core, bg,
-                                    scan.params.get('receivers', 1))['snr']
     p = scan.params
-    if m.get('snr_b0'):
-        m.update({f'b0_{k}': v for k, v in snr_efficiency(m['snr_b0'], p.get('voxel_nl'), p.get('scan_time_s')).items()})
+    if has_b0:
+        first_b0 = data[..., int(np.flatnonzero(shells == 0)[0]), 0]
+        gr = ghost_regions(obj, p['pe_axis'], p.get('epi_shots') or 1) if p.get('pe_axis') is not None else None
+        bg = background_mask(first_b0, obj, margin=4,
+                             exclude=ndi.binary_dilation(gr, iterations=2) if gr is not None else None)
+        m['snr_b0_bg'] = snr_background(first_b0, core, bg, p.get('receivers', 1))['snr']
+    # efficiency of ONE b0 image: divide by the time that image took (one volume),
+    # not the whole scan, so protocols with more directions are not penalised
+    if m.get('snr_b0') and p.get('voxel_nl') and p.get('vol_tr_s'):
+        m['b0_snr_per_nl_sqrt_s'] = m['snr_b0'] / p['voxel_nl'] / np.sqrt(p['vol_tr_s'])
     bmat = dwi_mod.bmatrices(scan.method)
     if bmat is not None and core.any():
         FA, MD = dwi_mod.fit_tensor(avg, bmat, brain, beff=np.asarray(scan.method.get('PVM_DwEffBval'), float))
@@ -214,7 +220,8 @@ def analyze_dwi(scan: Scan, ref: Reference, fmap: Optional[FieldMap]) -> Result:
         m['md_median_um2_ms'] = float(np.median(MD[core]) * 1000)
         res.arrays.update(FA=FA, MD=MD)
     shell_means = {b: avg[..., shells == b].mean(axis=-1) for b in np.unique(shells)}
-    res.arrays.update(b0=b0, shells=shell_means, aff=aff, brain=brain, core=core)
+    res.arrays.update(b0=b0, b0_label='b0' if has_b0 else 'mean DWI', shells=shell_means,
+                      aff=aff, brain=brain, core=core)
     return res
 
 
@@ -280,7 +287,8 @@ def analyze_fieldmap(fm: FieldMap, ref: Reference) -> Result:
     res.metrics.update(b0_stats(fm.hz, brain, freq_mhz=f0))
     res.metrics['brain_support_pct'] = float(100 * brain.sum() / max(resample_mask(ref.mask, ref.affine, fm.affine, fm.hz.shape).sum(), 1))
     v = fm.hz[brain]
-    res.arrays.update(hz=fm.hz, aff=fm.affine, brain=brain, values=v - np.median(v) if v.size else v)
+    res.arrays.update(hz=fm.hz, aff=fm.affine, brain=brain, support=fm.support,
+                      values=v - np.median(v) if v.size else v)
     return res
 
 
@@ -305,7 +313,8 @@ def run_all(scans: List[Scan], reference: Optional[int] = None, brain_mask: Opti
     progress(f'  brain mask {ref.volume_mm3:.0f} mm3 ({ref.how})')
 
     out: Dict[str, Any] = {'reference': ref, 'results': {r: [] for r in
-                                                         ('anat', 'dwi', 'epi_ref', 'bold', 'fieldmap', 'mrs')}}
+                                                         ('anat', 'dwi', 'epi_ref', 'epi_single', 'bold',
+                                                          'fieldmap', 'mrs')}}
     fmaps = [load_fieldmap(s) for s in scans if s.role == 'fieldmap']
     for fm in fmaps:
         if want(fm.scan):
@@ -321,9 +330,9 @@ def run_all(scans: List[Scan], reference: Optional[int] = None, brain_mask: Opti
             elif s.role == 'dwi':
                 progress(f'E{s.number} diffusion {s.params["name"]}')
                 out['results']['dwi'].append(analyze_dwi(s, ref, pick_fieldmap(fmaps, s)))
-            elif s.role == 'epi_ref':
-                progress(f'E{s.number} SE-EPI {s.params["name"]}')
-                out['results']['epi_ref'].append(analyze_epi_ref(s, ref, pick_fieldmap(fmaps, s)))
+            elif s.role in ('epi_ref', 'epi_single'):
+                progress(f'E{s.number} single-volume EPI {s.params["name"]}')
+                out['results'][s.role].append(analyze_epi_ref(s, ref, pick_fieldmap(fmaps, s)))
             elif s.role == 'bold':
                 progress(f'E{s.number} BOLD {s.params["name"]}')
                 out['results']['bold'].append(analyze_bold(s, ref, pick_fieldmap(fmaps, s)))

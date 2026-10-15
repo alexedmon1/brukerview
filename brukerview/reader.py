@@ -34,6 +34,21 @@ WORD_TYPES = {
 }
 
 
+def time_per_repetition(scan_time_s: Optional[float], n: int,
+                        fallback_s: Optional[float] = None) -> Optional[float]:
+    """Seconds between successive repetitions (volumes): scan time / n.
+
+    The one definition used by the viewer's ``t = ... s`` labels and by QC
+    (drift, tSNR per sqrt-time). ParaVision's scan time excludes dummy scans and
+    includes averages, so this is the actual sampling interval; the TR alone is
+    wrong for segmented EPI (one TR per shot) and multi-slice trains.
+    ``fallback_s`` is used when the scan time is unknown.
+    """
+    if scan_time_s and n:
+        return scan_time_s / n
+    return fallback_s
+
+
 @dataclass(frozen=True)
 class FrameGroup:
     """One entry of ``VisuFGOrderDesc``: a non-spatial dimension of the data."""
@@ -224,10 +239,8 @@ class BrukerImage:
             if isinstance(comments, list) and len(comments) == n:
                 return [str(c) for c in comments]
         if group.name in ('FG_MOVIE', 'FG_CYCLE'):
-            # Time per repetition = scan time / repetitions. The TR alone is wrong for
-            # segmented EPI (one TR per shot) and multi-slice/multi-echo trains.
-            step = self.scan_time_s / n if self.scan_time_s else (
-                self.repetition_time / 1000.0 if self.repetition_time else None)
+            step = time_per_repetition(self.scan_time_s, n,
+                                       self.repetition_time / 1000.0 if self.repetition_time else None)
             if step:
                 return [f't = {i * step:.2f} s' for i in range(n)]
         return [f'{group.label} {i + 1}/{n}' for i in range(n)]

@@ -48,12 +48,17 @@ def background_mask(vol: np.ndarray, obj: np.ndarray, margin: int = 4,
     return bg
 
 
-def sigma_background(vol: np.ndarray, bg: np.ndarray, n_channels: int = 1) -> float:
+def _trimmed(vol: np.ndarray, bg: np.ndarray) -> np.ndarray:
+    """Background values without the brightest 1% (stray ghosts, flow artefacts).
+    The noise SD and its validity check both use this same sample."""
     v = vol[bg]
+    return v[v <= np.percentile(v, 99)] if v.size else v
+
+
+def sigma_background(vol: np.ndarray, bg: np.ndarray, n_channels: int = 1) -> float:
+    v = _trimmed(vol, bg)
     if v.size < 50:
         return float('nan')
-    # trim the brightest 1% (stray ghosts, flow artefacts) before taking the SD
-    v = v[v <= np.percentile(v, 99)]
     return float(np.std(v) / magnitude_sd_factor(n_channels))
 
 
@@ -61,7 +66,7 @@ def background_ratio(vol: np.ndarray, bg: np.ndarray) -> float:
     """mean/SD of the background. Pure magnitude noise gives 1.91 (one channel)
     to 2.75 (two-channel sum of squares); values near 1 mean the "background" is
     really low-signal tissue or artefact, and background SNR is not valid."""
-    v = vol[bg]
+    v = _trimmed(vol, bg)
     return float(v.mean() / v.std()) if v.size > 50 and v.std() > 0 else float('nan')
 
 

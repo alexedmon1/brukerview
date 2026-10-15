@@ -27,6 +27,30 @@ def shell_labels(method: Dict, b0_threshold: float = 100.0) -> np.ndarray:
     return lab
 
 
+def arrange(data: np.ndarray, extra_names: List[str], n_diff: int) -> np.ndarray:
+    """Put a DWI load() array into ``(x, y, z, n_diff, n_rep)``.
+
+    The diffusion axis is found by its frame-group name (any order on disk), or
+    failing that by its length; every other group is folded into repetitions.
+    Raises if no axis has one volume per b-value.
+    """
+    if data.ndim == 3:
+        data = data[..., None]
+        extra_names = ['diffusion']
+    names = list(extra_names)
+    if 'diffusion' in names:
+        d = names.index('diffusion')
+    else:
+        same = [i for i in range(len(names)) if data.shape[3 + i] == n_diff]
+        if not same:
+            raise ValueError(f'no frame group with {n_diff} diffusion volumes in {data.shape}')
+        d = same[0]
+    arr = np.moveaxis(data, 3 + d, 3)
+    if arr.shape[3] != n_diff:
+        raise ValueError(f'diffusion axis has {arr.shape[3]} volumes but there are {n_diff} b-values')
+    return arr.reshape(arr.shape[:4] + (-1,))
+
+
 def shell_snr(data: np.ndarray, shells: np.ndarray, brain: np.ndarray) -> List[Dict[str, float]]:
     """Per-shell single-image SNR from two repetitions (difference method).
 
@@ -65,14 +89,16 @@ def fit_tensor(signal: np.ndarray, bmat: np.ndarray, mask: np.ndarray,
     B = bmat[use]
     X = np.column_stack([-B[:, 0, 0], -B[:, 1, 1], -B[:, 2, 2],
                          -2 * B[:, 0, 1], -2 * B[:, 0, 2], -2 * B[:, 1, 2], np.ones(use.sum())])
-    S = np.clip(signal[mask][:, use].astype(np.float64), 1e-3, None)
+    S = np.clip(signal[mask][:, use].astype(np.float64), 1e-3, None)   # (n_vox, n_vol)
     y = np.log(S)
-    beta_ols, *_ = np.linalg.lstsq(X, y.T, rcond=None)
-    w = np.exp(X @ beta_ols) ** 2  # (n_vol, n_vox)
-    beta = np.empty_like(beta_ols)
-    for v in range(y.shape[0]):
-        Xw = X * w[:, v:v + 1]
-        beta[:, v] = np.linalg.lstsq(X.T @ Xw, Xw.T @ y[v], rcond=None)[0]
+    beta_ols, *_ = np.linalg.lstsq(X, y.T, rcond=None)                    # (7, n_vox)
+    # weights = predicted signal squared, capped at twice each voxel's largest
+    # measured signal so an extrapolating OLS fit cannot dominate the system
+    pred = np.minimum(np.exp(X @ beta_ols).T, 2.0 * S.max(axis=1, keepdims=True))
+    w = pred ** 2                                                          # (n_vox, n_vol)
+    XtWX = np.einsum('vn,ni,nj->vij', w, X, X)
+    XtWy = np.einsum('vn,ni,vn->vi', w, X, y)
+    beta = np.linalg.solve(XtWX + 1e-12 * np.eye(7), XtWy[..., None])[..., 0].T
     D = np.zeros((y.shape[0], 3, 3))
     D[:, 0, 0], D[:, 1, 1], D[:, 2, 2] = beta[0], beta[1], beta[2]
     D[:, 0, 1] = D[:, 1, 0] = beta[3]

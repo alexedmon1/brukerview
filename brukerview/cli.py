@@ -256,12 +256,15 @@ def cmd_qc(args):
         from .qc import run_qc
     except ImportError as e:  # scipy/nibabel missing
         sys.exit(f'brukerview qc needs the qc extra ({e}); install with: pip install "brukerview[qc]"')
+    import logging
+    # a scan that fails is skipped with a one-line message; the traceback goes to stderr
+    logging.basicConfig(level=logging.WARNING, format='%(levelname)s %(name)s: %(message)s')
     study = Path(args.path).expanduser().resolve()
     out = Path(args.output) if args.output else Path.cwd() / f'qc_{study.name}'
     path = run_qc(study, out, reference=args.reference,
                   brain_mask=Path(args.brain_mask) if args.brain_mask else None,
                   use_bet=not args.no_bet, scans=args.scans,
-                  notes=Path(args.notes) if args.notes else None)
+                  notes=Path(args.notes) if args.notes else None, proc=args.proc)
     print(f'report: {path}')
 
 
@@ -350,6 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--no-bet', action='store_true', help='do not use FSL bet2 for the mask hull')
     sp.add_argument('--scans', type=int, nargs='+', metavar='N', help='only analyse these scans')
     sp.add_argument('--notes', metavar='MD', help='markdown file shown in the report summary')
+    sp.add_argument('-p', '--proc', help='pdata number to measure (default: 1; field maps: the one in Hz)')
     sp.set_defaults(func=cmd_qc)
 
     sp = sub.add_parser('install-imagej', help='copy the macro into ImageJ/plugins')

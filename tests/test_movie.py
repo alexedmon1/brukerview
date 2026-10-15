@@ -78,3 +78,14 @@ def test_time_labels_use_scan_time_per_repetition(viewer):
     assert img.group_labels(cyc) == ['t = 0.00 s', 't = 2.00 s', 't = 4.00 s', 't = 6.00 s']
     del img.visu['VisuAcqScanTime']
     assert img.group_labels(cyc)[1] == 't = 1.00 s'  # falls back to TR
+
+
+def test_time_resolves_to_a_nifti_volume_axis(tmp_path):
+    nib = pytest.importorskip('nibabel')
+    import numpy as np
+    from brukerview.nifti import NiftiImage
+    p = tmp_path / 'bold.nii.gz'
+    nib.save(nib.Nifti1Image(np.random.rand(8, 6, 3, 5).astype('float32'), np.eye(4)), str(p))
+    v = SliceViewer(NiftiImage(p))
+    assert v.dim_names == ['slice', 'volume']
+    assert v.resolve_dim('time') == 1

@@ -15,7 +15,7 @@ from typing import Iterable, Optional
 
 def run_qc(study_dir, out_dir, reference: Optional[int] = None, brain_mask: Optional[Path] = None,
            use_bet: bool = True, scans: Optional[Iterable[int]] = None, notes: Optional[Path] = None,
-           progress=print) -> Path:
+           proc: Optional[str] = None, progress=print) -> Path:
     """Run QC on one study and write ``report.html``, ``qc_metrics.tsv``,
     ``parameters.tsv`` and ``brain_mask.nii.gz`` into ``out_dir``. Returns the report path."""
     import nibabel as nib
@@ -28,7 +28,7 @@ def run_qc(study_dir, out_dir, reference: Optional[int] = None, brain_mask: Opti
 
     study_dir, out_dir = Path(study_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    all_scans = inventory(study_dir)
+    all_scans = inventory(study_dir, proc=proc)
     if not all_scans:
         raise SystemExit(f'{study_dir}: no scans found')
     only = set(scans) if scans else None

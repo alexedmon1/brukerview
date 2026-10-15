@@ -9,6 +9,7 @@ categorical slots ``--s1..--s3`` in fixed order; at most three series per chart.
 from __future__ import annotations
 
 import math
+import numbers
 from html import escape
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -46,6 +47,12 @@ def fmt_num(v: Optional[float], digits: int = 3) -> str:
     if a >= 1:
         return f'{v:.2f}'
     return f'{v:.{digits}f}'
+
+
+def _is_number(v) -> bool:
+    """A finite real number, NumPy scalars included (np.float32 and np.int64 are
+    not subclasses of float/int)."""
+    return isinstance(v, numbers.Real) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _scale(d0, d1, r0, r1):
@@ -151,9 +158,9 @@ def dot_rows(labels: Sequence[str], panels: Sequence[Dict], groups: Optional[Seq
     for j, p in enumerate(panels):
         x0 = label_width + j * (panel_width + 16)
         x1 = x0 + panel_width
-        vals = [v if v is not None and isinstance(v, (int, float)) and math.isfinite(v) else None for v in p['values']]
-        lo = [a if a is not None else v for a, v in zip(p.get('lo') or vals, vals)]
-        hi = [a if a is not None else v for a, v in zip(p.get('hi') or vals, vals)]
+        vals = [float(v) if _is_number(v) else None for v in p['values']]
+        lo = [float(a) if _is_number(a) else v for a, v in zip(p.get('lo') or vals, vals)]
+        hi = [float(a) if _is_number(a) else v for a, v in zip(p.get('hi') or vals, vals)]
         fin = [v for v in lo + hi + vals if v is not None]
         if p.get('ref'):
             fin.append(p['ref'][0])

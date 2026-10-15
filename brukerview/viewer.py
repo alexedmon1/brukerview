@@ -63,7 +63,7 @@ def montage_array(vol: np.ndarray, cols: Optional[int] = None) -> np.ndarray:
     return out
 
 
-TIME_NAMES = ('cycle', 'movie', 'repetition', 'frame')
+TIME_NAMES = ('cycle', 'movie', 'repetition', 'frame', 'volume')   # 'volume': a NIfTI 4th axis
 
 
 class SliceViewer:

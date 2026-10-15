@@ -138,3 +138,122 @@ def test_charts_and_markdown_render():
     assert 'best' in dots and 'n/a' in dots
     html = md_to_html('# Head\n\nSome **bold** text.\n- item one\n- item `two`')
     assert '<h2>Head</h2>' in html and '<strong>bold</strong>' in html and '<li>item <code>two</code></li>' in html
+
+
+# ---- fixes from the 0.1.0 code review -------------------------------------------------
+from pathlib import Path  # noqa: E402
+
+from brukerview.qc import report, scans  # noqa: E402
+from brukerview.reader import time_per_repetition  # noqa: E402
+
+
+def epi_params(**over):
+    method = {'Method': 'Bruker:EPI', 'PVM_Fov': [32, 24], 'PVM_SpatResol': [0.25, 0.25], 'PVM_Matrix': [128, 96],
+              'PVM_SliceThick': 0.8, 'PVM_RepetitionTime': 1000, 'PVM_EpiNShots': 2, 'PVM_NRepetitions': 10,
+              'PVM_ScanTime': 20000, 'PVM_EpiEffBandwidth': 6000.0}
+    visu = {'VisuAcqGradEncoding': ['read_enc', 'phase_enc'], 'VisuCoreExtent': [32, 24],
+            'VisuAcqEchoSequenceType': 'GradientEcho', 'VisuAcqEchoTime': [10]}
+    method.update(over.pop('method', {}))
+    visu.update(over.pop('visu', {}))
+    return method, visu
+
+
+def test_pe_fov_follows_image_axis_not_pvm_fov_index():
+    m, v = epi_params()
+    assert scans.extract_params(Path('21'), m, {}, v)['pe_fov_mm'] == 24      # PE on image axis 1
+    m, v = epi_params(visu={'VisuAcqGradEncoding': ['phase_enc', 'read_enc'], 'VisuCoreExtent': [24, 32]})
+    # PE on image axis 0: its length is VisuCoreExtent[0] = 24, not PVM_Fov[0] = 32 (the read FOV)
+    assert scans.extract_params(Path('21'), m, {}, v)['pe_fov_mm'] == 24
+
+
+def test_volume_time_is_scan_time_over_volumes():
+    # NA=2 doubles the time per volume; TR x shots does not know that
+    m, v = epi_params(method={'PVM_NAverages': 2, 'PVM_ScanTime': 40000})
+    assert scans.extract_params(Path('21'), m, {}, v)['vol_tr_s'] == pytest.approx(4.0)
+    assert time_per_repetition(40.0, 10, 2.0) == pytest.approx(4.0)
+    assert time_per_repetition(None, 10, 2.0) == 2.0           # no scan time: TR x shots
+    m, v = epi_params(method={'Method': 'Bruker:DtiEpi', 'PVM_DwNDiffExp': 75, 'PVM_NRepetitions': 2,
+                              'PVM_ScanTime': 1500000, 'PVM_EpiNShots': 4, 'PVM_RepetitionTime': 2500})
+    assert scans.extract_params(Path('13'), m, {}, v)['vol_tr_s'] == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize('echo, rev, role', [('GradientEcho', 'No', 'epi_single'),
+                                              ('Both', 'No', 'epi_ref'), ('SpinEcho', 'No', 'epi_ref'),
+                                              ('GradientEcho', 'Yes', 'epi_ref')])
+def test_single_volume_epi_roles(tmp_path, echo, rev, role):
+    m, v = epi_params(method={'PVM_NRepetitions': 1, 'PVM_EpiReversedPE': rev},
+                      visu={'VisuAcqEchoSequenceType': echo})
+    s = scans.Scan(tmp_path / '15', m, {}, v)
+    s.params = scans.extract_params(Path('15'), m, {}, v)
+    assert scans.classify(s) == role
+
+
+def test_fieldmap_pdata_in_hz_is_chosen(tmp_path):
+    scan = tmp_path / '12'
+    for n, units in (('1', '<a.u.>'), ('2', '<Hz>')):
+        d = scan / 'pdata' / n
+        d.mkdir(parents=True)
+        (d / '2dseq').write_bytes(b'')
+        (d / 'visu_pars').write_text(f'##$VisuCoreDataUnits=( 1, 65 )\n{units}\n##END=\n')
+    fm = {'Method': 'Bruker:FieldMap'}
+    assert scans.choose_pdata(scan, fm).name == '2'
+    assert scans.choose_pdata(scan, fm, proc='1').name == '1'                # --proc wins
+    assert scans.choose_pdata(scan, {'Method': 'Bruker:RARE'}).name == '1'
+
+
+def test_fieldmap_support_keeps_on_resonance_zeros():
+    from brukerview.qc.analyze import FieldMap  # noqa: F401  (import check)
+    from brukerview.qc.geometry import fill_holes_2d
+    from scipy import ndimage as ndi
+    hz = np.zeros((20, 20, 10), np.float32)
+    hz[5:15, 5:15, 2:8] = 40.0
+    hz[9:11, 9:11, 4:6] = 0.0          # exactly on resonance, inside the object
+    support = fill_holes_2d(ndi.binary_fill_holes(hz != 0)) & np.isfinite(hz)
+    assert support[10, 10, 5] and not support[1, 1, 5]
+
+
+def test_dwi_axes_found_by_name_in_any_order():
+    x = np.arange(4 * 3 * 2 * 5 * 2, dtype=float).reshape(4, 3, 2, 5, 2)    # (x, y, z, diffusion, cycle)
+    swapped = np.moveaxis(x, 3, 4)                                         # repetitions stored faster
+    a = dwi.arrange(x, ['diffusion', 'cycle'], 5)
+    b = dwi.arrange(swapped, ['cycle', 'diffusion'], 5)
+    np.testing.assert_array_equal(a, b)
+    assert a.shape == (4, 3, 2, 5, 2)
+    with pytest.raises(ValueError, match='7 b-values'):
+        dwi.arrange(x, ['diffusion', 'cycle'], 7)
+
+
+def test_dwi_shell_snr_without_b0():
+    shells = np.array([1000.0, 1000.0, 2000.0])
+    data = 100 + RNG.normal(0, 5, (16, 16, 2, 3, 2))
+    rows = dwi.shell_snr(data, shells, np.ones((16, 16, 2), bool))
+    assert [r['b'] for r in rows] == [1000.0, 2000.0]
+
+
+def test_dot_rows_draw_numpy_scalars():
+    svg = charts.dot_rows(['a', 'b', 'c'], [{'title': 'm', 'better': 'high',
+                                             'values': [np.float64(1.0), np.float32(2.0), np.int64(3)],
+                                             'lo': [np.float32(0.5), None, None], 'hi': [np.float32(1.5), None, None]}])
+    assert 'n/a' not in svg and svg.count('class="dot') == 3 and 'whisker' in svg
+
+
+def test_sweep_skips_scan_without_tsnr():
+    class R:  # just what sweep_series reads
+        def __init__(self, n, thick, tsnr):
+            self.scan = type('S', (), {'number': n, 'params': {'slice_thick_mm': thick, 'slice_gap_mm': 0.2,
+                                                                'n_slices': 9}})()
+            self.metrics = {'tsnr': tsnr, 'coverage_sampled_pct': 80.0}
+    sweeps = [(None, [R(1, 0.5, 8.0), R(2, 0.6, None), R(3, 0.8, 11.0)])]
+    s1, s2 = report.sweep_series(sweeps, ['TR 750'])
+    assert [p[0] for p in s1[0]['points']] == [0.5, 0.8] and len(s2[0]['points']) == 3
+
+
+def test_background_ratio_uses_the_trimmed_sample():
+    shape = (96, 96, 6)
+    obj = np.zeros(shape, bool)
+    obj[30:66, 30:66] = True
+    vol = sos_magnitude(np.where(obj, 200.0, 0.0), 4.0, 2, shape)
+    bg = metrics.background_mask(vol, obj, margin=4)
+    idx = np.flatnonzero(bg.ravel())[:: 150]          # well under 1% of the background
+    vol.ravel()[idx] = 5000.0                          # stray ghost/flow voxels
+    assert metrics.BG_RATIO_VALID[0] < metrics.background_ratio(vol, bg) < metrics.BG_RATIO_VALID[1]

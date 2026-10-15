@@ -6,6 +6,7 @@ Everything here comes from the text parameter files (``method``, ``acqp``,
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,13 +15,17 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from ..jcampdx import read_jcampdx
-from ..study import scan_dirs
+from ..reader import time_per_repetition
+from ..study import pdata_dirs, scan_dirs
+
+logger = logging.getLogger(__name__)
 
 # Roles, in report order.
 ROLES = {
     'anat': 'Anatomical (RARE)',
     'dwi': 'Diffusion (DTI-EPI)',
     'epi_ref': 'Spin-echo EPI references (reverse PE)',
+    'epi_single': 'Single-volume EPI',
     'bold': 'Functional (T2* GE-EPI)',
     'fieldmap': 'B0 field maps',
     'mrs': 'Spectroscopy / shim voxels',
@@ -28,7 +33,7 @@ ROLES = {
     'adjustment': 'EPI ghost-correction adjustment scans',
     'other': 'Other',
 }
-ANALYSED_ROLES = ('anat', 'dwi', 'epi_ref', 'bold', 'fieldmap', 'mrs')
+ANALYSED_ROLES = ('anat', 'dwi', 'epi_ref', 'epi_single', 'bold', 'fieldmap', 'mrs')
 
 
 def _first(v: Any, default=None):
@@ -58,6 +63,7 @@ class Scan:
     visu: Dict[str, Any]
     params: Dict[str, Any] = field(default_factory=dict)
     role: str = 'other'
+    proc_dir: Optional[Path] = None   # the reconstruction QC reads (pdata/N)
 
     @property
     def number(self) -> int:
@@ -65,11 +71,29 @@ class Scan:
 
     @property
     def pdata(self) -> Path:
-        return self.path / 'pdata' / '1'
+        return self.proc_dir or self.path / 'pdata' / '1'
 
     @property
     def label(self) -> str:
         return f"E{self.number} {self.params.get('name', '')}".strip()
+
+
+def choose_pdata(scan_dir: Path, method: Dict[str, Any], proc: Optional[str] = None) -> Optional[Path]:
+    """The reconstruction to measure: ``proc`` if given and present; for a field
+    map the one whose image is in Hz (ParaVision may put magnitude in another);
+    otherwise pdata/1, else the first one."""
+    procs = pdata_dirs(scan_dir)
+    if not procs:
+        return None
+    if proc is not None and (scan_dir / 'pdata' / str(proc)) in procs:
+        return scan_dir / 'pdata' / str(proc)
+    if _strip(method.get('Method')) == 'FieldMap' and len(procs) > 1:
+        for p in procs:
+            units = read_jcampdx(p / 'visu_pars').get('VisuCoreDataUnits')
+            if 'hz' in str(units).lower():
+                return p
+    first = scan_dir / 'pdata' / '1'
+    return first if first in procs else procs[0]
 
 
 def _scan_name(acqp: Dict[str, Any], visu: Dict[str, Any]) -> str:
@@ -101,6 +125,12 @@ def extract_params(path: Path, method: Dict, acqp: Dict, visu: Dict) -> Dict[str
     ppi = max(_floats(m.get('PVM_EncPpi')) or [1.0])
     grad_enc = [str(g) for g in np.atleast_1d(visu.get('VisuAcqGradEncoding') or [])]
     pe_axis = grad_enc.index('phase_enc') if 'phase_enc' in grad_enc else None
+    # VisuAcqGradEncoding follows the image axes, PVM_Fov is (read, phase[, slice]):
+    # the phase-encode FOV is the image extent along pe_axis, not PVM_Fov[pe_axis].
+    extent = _floats(visu.get('VisuCoreExtent'))
+    pe_fov = extent[pe_axis] if pe_axis is not None and pe_axis < len(extent) else None
+    if pe_fov is not None and len(fov) > 1 and abs(fov[1] - pe_fov) > 1e-3:
+        logger.warning('%s: phase-encode extent %.3g mm differs from PVM_Fov[1] %.3g mm', path, pe_fov, fov[1])
 
     p: Dict[str, Any] = {
         'scan': int(path.name),
@@ -130,7 +160,7 @@ def extract_params(path: Path, method: Dict, acqp: Dict, visu: Dict) -> Dict[str
         'epi_esp_ms': float(m['PVM_EpiEchoSpacing']) if 'PVM_EpiEchoSpacing' in m else None,
         'epi_eff_bw_hz': float(m['PVM_EpiEffBandwidth']) if 'PVM_EpiEffBandwidth' in m else None,
         'pe_axis': pe_axis,
-        'pe_fov_mm': fov[pe_axis] if pe_axis is not None and pe_axis < len(fov) else None,
+        'pe_fov_mm': pe_fov,
         'reversed_pe': str(m.get('PVM_EpiReversedPE', '')) if 'PVM_EpiReversedPE' in m else None,
         'fat_sup': str(m.get('PVM_FatSupOnOff', '')) or None,
         'fov_sat': str(m.get('PVM_FovSatOnOff', '')) or None,
@@ -138,12 +168,17 @@ def extract_params(path: Path, method: Dict, acqp: Dict, visu: Dict) -> Dict[str
         'dummy_scans': int(m['PVM_DummyScans']) if 'PVM_DummyScans' in m else None,
         'receivers': int(m.get('PVM_EncNReceivers', 1) or 1),
         'scan_time_s': scan_time,
+        'echo_type': str(visu.get('VisuAcqEchoSequenceType') or ''),
     }
     if p['voxel_nl'] is not None:
         p['voxel_nl'] = p['voxel_nl'] * 1000.0
-    # Volume TR: a segmented EPI needs one TR per shot for each volume.
+    # Time per volume, by the same rule the viewer's time labels use
+    # (reader.time_per_repetition): scan time / volumes. PVM_ScanTime excludes
+    # dummy scans and includes averages, so this is the real sampling interval.
+    # TR x shots is only the fallback (one TR per shot for segmented EPI).
     if meth in ('EPI', 'DtiEpi') and tr:
-        p['vol_tr_s'] = tr * (shots or 1) / 1000.0
+        n_vol = nr * (int(m.get('PVM_DwNDiffExp', 1) or 1) if meth == 'DtiEpi' else 1)
+        p['vol_tr_s'] = time_per_repetition(scan_time, n_vol, tr * (shots or 1) / 1000.0)
     if meth == 'DtiEpi':
         p['b_values'] = '/'.join(f'{b:g}' for b in _floats(m.get('PVM_DwBvalEach')))
         p['n_dirs'] = int(m.get('PVM_DwNDiffDir', 0) or 0)
@@ -176,30 +211,36 @@ def classify(scan: Scan) -> str:
     if meth == 'DtiEpi':
         return 'dwi'
     if meth in ('EPI', 'T2S_EPI'):
-        return 'bold' if p.get('repetitions', 1) > 1 else 'epi_ref'
+        if p.get('repetitions', 1) > 1:
+            return 'bold'
+        # a topup reference is a spin-echo EPI or one acquired with reversed PE;
+        # any other one-volume EPI (a gradient-echo scout) is not
+        spin_echo = p.get('echo_type') in ('SpinEcho', 'Both')
+        return 'epi_ref' if spin_echo or p.get('reversed_pe') == 'Yes' else 'epi_single'
     if meth in ('RARE', 'FLASH', 'FISP', 'MSME', 'TurboRARE'):
         return 'anat'
     return 'other'
 
 
-def load_scan(path: Path) -> Optional[Scan]:
-    method_p, acqp_p, visu_p = path / 'method', path / 'acqp', path / 'pdata' / '1' / 'visu_pars'
+def load_scan(path: Path, proc: Optional[str] = None) -> Optional[Scan]:
+    method_p, acqp_p = path / 'method', path / 'acqp'
     if not method_p.exists():
         return None
     method = read_jcampdx(method_p)
     acqp = read_jcampdx(acqp_p) if acqp_p.exists() else {}
-    visu = read_jcampdx(visu_p) if visu_p.exists() else {}
-    scan = Scan(path, method, acqp, visu)
+    pdata = choose_pdata(path, method, proc)
+    visu = read_jcampdx(pdata / 'visu_pars') if pdata else {}
+    scan = Scan(path, method, acqp, visu, proc_dir=pdata)
     scan.params = extract_params(path, method, acqp, visu)
     scan.role = classify(scan)
     return scan
 
 
-def inventory(study_dir: Path) -> List[Scan]:
+def inventory(study_dir: Path, proc: Optional[str] = None) -> List[Scan]:
     """All scans of one study, in acquisition order."""
     out = []
     for d in scan_dirs(Path(study_dir)):
-        s = load_scan(d)
+        s = load_scan(d, proc)
         if s is not None:
             out.append(s)
     return out

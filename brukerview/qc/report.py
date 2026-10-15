@@ -30,7 +30,7 @@ METRICS: Dict[str, Tuple[str, Optional[str], str]] = {
     'snr_b1000': ('SNR b1000', 'high', '{:.1f}'),
     'snr_b2000': ('SNR b2000', 'high', '{:.1f}'),
     'snr_b0_bg': ('SNR b0 (background)', 'high', '{:.1f}'),
-    'b0_snr_per_nl_sqrt_min': ('b0 SNR / nL / √min', 'high', '{:.3f}'),
+    'b0_snr_per_nl_sqrt_s': ('b0 SNR / nL / √s per vol.', 'high', '{:.3f}'),
     'fa_median': ('FA median', None, '{:.2f}'),
     'md_median_um2_ms': ('MD median (µm²/ms)', None, '{:.2f}'),
     'tsnr': ('tSNR (median)', 'high', '{:.1f}'),
@@ -59,9 +59,11 @@ METRICS: Dict[str, Tuple[str, Optional[str], str]] = {
 ROLE_METRICS = {
     'anat': ['snr', 'cnr', 'contrast_ratio', 'snr_per_sqrt_min', 'snr_per_nl_sqrt_min', 'cnr_per_nl_sqrt_min',
              'noise_method', 'bg_ratio'],
-    'dwi': ['snr_b0', 'snr_b500', 'snr_b1000', 'snr_b2000', 'snr_b0_bg', 'b0_snr_per_nl_sqrt_min',
+    'dwi': ['snr_b0', 'snr_b500', 'snr_b1000', 'snr_b2000', 'snr_b0_bg', 'b0_snr_per_nl_sqrt_s',
             'fa_median', 'md_median_um2_ms', 'ghost_pct', 'coverage_slab_pct', 'coverage_sampled_pct',
             'disp_median_mm', 'disp_p95_mm', 'disp_p95_px'],
+    'epi_single': ['snr', 'snr_per_nl_sqrt_min', 'bg_ratio', 'ghost_pct', 'coverage_slab_pct',
+                   'coverage_sampled_pct', 'disp_p95_mm', 'disp_p95_px'],
     'epi_ref': ['snr', 'snr_per_nl_sqrt_min', 'bg_ratio', 'ghost_pct', 'coverage_slab_pct',
                 'coverage_sampled_pct', 'disp_p95_mm', 'disp_p95_px'],
     'bold': ['tsnr', 'tsnr_first10', 'snr_diff', 'tsnr_per_sqrt_s', 'tsnr_per_nl_sqrt_s', 'ghost_pct',
@@ -298,7 +300,7 @@ def sec_dwi(results) -> str:
                                                r.arrays['brain'], mid, lab),
                      f'{escape(lab)}: one slice, mean of each shell, FA and MD.')
         b0 = r.arrays['b0']
-        rows = [{'data': b0, 'label': 'b0', 'vmin': 0, 'vmax': figures.window(b0[core])[1]}]
+        rows = [{'data': b0, 'label': r.arrays.get('b0_label', 'b0'), 'vmin': 0, 'vmax': figures.window(b0[core])[1]}]
         if r.arrays.get('FA') is not None:
             rows.append({'data': r.arrays['FA'], 'label': 'FA', 'vmin': 0, 'vmax': 0.8, 'outline': False})
         if r.arrays.get('disp_map') is not None:
@@ -310,15 +312,26 @@ def sec_dwi(results) -> str:
     return body
 
 
-def sec_epi_ref(results) -> str:
+def sec_epi_ref(results, pairs: bool = True) -> str:
+    """Single-volume EPI. ``pairs``: spin-echo / reversed-PE references, shown as
+    forward/reverse pairs per orientation; otherwise plain single-volume scans."""
     scans = [r.scan for r in results]
-    labels = labels_for(scans)
     body = '<h3>Protocol parameters</h3>' + param_table(scans)
     body += '<h3>Metrics</h3>' + metric_table(results, ROLE_METRICS['epi_ref'])
-    body += ('<p class="note">Single-volume references: SNR comes from the air background (validated by its '
-             'mean/SD ratio). Forward/reversed phase-encode pairs are meant for susceptibility '
-             'correction (e.g. FSL topup); their displacement is equal and opposite, so the predicted '
-             'shift magnitude is identical within a pair.</p>')
+    note = 'Single volumes: SNR comes from the air background (validated by its mean/SD ratio).'
+    if pairs:
+        note += (' Forward/reversed phase-encode pairs are meant for susceptibility correction (e.g. FSL topup); '
+                 'their displacement is equal and opposite, so the predicted shift magnitude is identical within '
+                 'a pair.')
+    body += f'<p class="note">{note}</p>'
+    if not pairs:
+        body += '<h3>Representative images</h3>'
+        for r in results:
+            m = r.arrays['mean']
+            rows = [{'data': m, 'label': f'E{r.scan.number}', 'vmin': 0, 'vmax': figures.window(m[r.arrays['core']])[1]}]
+            body += _fig(figures.montage(rows, r.arrays['brain'], figures.pick_slices(r.arrays['core'], 7)),
+                         f'E{r.scan.number} {escape(r.scan.params["name"])} with the anatomical brain outline.')
+        return body
     # pairs: same orientation, opposite PE
     body += '<h3>Representative images</h3>'
     by_orient: Dict[str, list] = {}
@@ -354,6 +367,23 @@ def _bold_sweeps(results) -> List[Tuple[str, List]]:
     return sorted(out, key=lambda kv: -len(kv[1]))[:3]
 
 
+def sweep_series(sweeps, names):
+    """(tSNR, coverage) line series for the slice-thickness sweeps. A scan whose
+    brain core came out empty has no tSNR and is left off the line."""
+    s1, s2 = [], []
+    for i, ((k, rs), nm) in enumerate(zip(sweeps, names)):
+        s1.append({'name': nm, 'slot': i + 1, 'points': [
+            (r.scan.params['slice_thick_mm'], r.metrics['tsnr'],
+             f"E{r.scan.number} {nm}, {r.scan.params['slice_thick_mm']:.2f} mm "
+             f"(+{r.scan.params.get('slice_gap_mm') or 0:.1f} gap, {r.scan.params.get('n_slices')} sl): "
+             f"tSNR {r.metrics['tsnr']:.1f}") for r in rs if r.metrics.get('tsnr') is not None]})
+        s2.append({'name': nm, 'slot': i + 1, 'points': [
+            (r.scan.params['slice_thick_mm'], r.metrics['coverage_sampled_pct'],
+             f"E{r.scan.number} {nm}: {r.metrics['coverage_sampled_pct']:.0f}% of brain voxels inside a slice")
+            for r in rs if r.metrics.get('coverage_sampled_pct') is not None]})
+    return s1, s2
+
+
 def sec_bold(results) -> str:
     scans = [r.scan for r in results]
     labels = labels_for(scans)
@@ -387,20 +417,10 @@ def sec_bold(results) -> str:
             names.append(f"TR {p['tr_ms']:g} ms (vol {p.get('vol_tr_s', 0):.1f} s)")
         if len(set(names)) < len(names):
             names = [f"{n} · {rs[0].scan.params.get('orientation')}" for n, (k, rs) in zip(names, sweeps)]
-        s1, s2 = [], []
-        for i, ((k, rs), nm) in enumerate(zip(sweeps, names)):
-            s1.append({'name': nm, 'slot': i + 1, 'points': [
-                (r.scan.params['slice_thick_mm'], r.metrics.get('tsnr'),
-                 f"E{r.scan.number} {nm}, {r.scan.params['slice_thick_mm']:.2f} mm "
-                 f"(+{r.scan.params.get('slice_gap_mm') or 0:.1f} gap, {r.scan.params.get('n_slices')} sl): "
-                 f"tSNR {r.metrics.get('tsnr'):.1f}") for r in rs]})
-            s2.append({'name': nm, 'slot': i + 1, 'points': [
-                (r.scan.params['slice_thick_mm'], r.metrics.get('coverage_sampled_pct'),
-                 f"E{r.scan.number} {nm}: {r.metrics.get('coverage_sampled_pct'):.0f}% of brain voxels inside a slice")
-                for r in rs]})
+        s1, s2 = sweep_series(sweeps, names)
         body += '<h3>Slice-thickness sweep</h3><div class="grid2">' + _chart(
             'tSNR vs slice thickness', charts.line_chart(s1, 'slice thickness (mm)', 'tSNR (median)', aria='tSNR vs thickness'),
-            'Scans identical except for slice thickness/gap. Thermal SNR is proportional to thickness; '
+            'Scans identical except for slice thickness (same gap). Thermal SNR is proportional to thickness; '
             'departures from a straight line through zero show other noise sources or slice-profile effects.', s1) + _chart(
             'Brain sampled vs slice thickness', charts.line_chart(s2, 'slice thickness (mm)', '% brain voxels inside a slice', aria='coverage vs thickness'),
             'Thicker slices with the same gap sample more of the brain; the slab extent is set by slices × (thickness + gap).', s2) + '</div>'
@@ -477,7 +497,7 @@ def sec_fieldmap_mrs(fm_results, mrs_results, ref) -> str:
         body += '<div class="grid2">' + _chart('Off-resonance in the brain', charts.line_chart(
             series, 'ΔB0 relative to brain median (Hz)', 'density (% of voxels per Hz)', markers=False,
             aria='B0 histogram'), 'Narrower = better shim. 100 Hz ≈ 0.33 ppm at 7 T.', series)
-        vols = [{'data': np.where(r.arrays['hz'] != 0, r.arrays['hz'] - np.median(r.arrays['hz'][r.arrays['brain']]), np.nan),
+        vols = [{'data': np.where(r.arrays['support'], r.arrays['hz'] - np.median(r.arrays['hz'][r.arrays['brain']]), np.nan),
                  'aff': r.arrays['aff'], 'label': f'E{r.scan.number}', 'mask': ref.mask, 'mask_aff': ref.affine,
                  'cmap': 'RdBu_r', 'window': (-300, 300)} for r in fm_results]
         body += _fig(figures.ortho(vols, ref.center, np.array([6.5, 5.0, 8.0]), res=0.1),
@@ -521,8 +541,10 @@ from ghost locations, divided by the SD of pure magnitude noise for the number o
 (3) Otherwise (tight 3-D FOV with no air around the head): the same, in the darkest 1% of 5-voxel neighbourhoods
 inside the FOV (airways, ear canals), again only if their mean/SD looks like noise; (4) last resort: robust SD of the
 Laplacian-filtered image inside the brain.</li>
-<li><strong>SNR</strong> = mean brain-core signal / σ, for one image. <strong>Efficiency</strong> divides out √(scan time) and
-voxel volume (1 nL = 0.001 mm³), the two things SNR is traded against.</li>
+<li><strong>SNR</strong> = mean brain-core signal / σ, for one image. <strong>Efficiency</strong> divides out √(time) and
+voxel volume (1 nL = 0.001 mm³), the two things SNR is traded against. The time is the one that image took: the whole scan
+for an anatomical volume, one volume for EPI (DTI b0, BOLD). Time per volume is scan time / volumes, the same rule the
+viewer uses; ParaVision's scan time excludes dummy scans and includes averages.</li>
 <li><strong>tSNR</strong>: voxelwise mean / SD of the linearly detrended time series (dof-corrected), median over the brain core.
 Runs of 10 volumes give a tSNR dominated by thermal noise; 100-volume runs include physiological fluctuation and drift.</li>
 <li><strong>Ghosting</strong>: Otsu head mask of the mean image, shifted by N/2 and by k·N/shots along phase encoding (wrapped).
@@ -532,8 +554,12 @@ median; displacement = Δf · FOV<sub>PE</sub> / <code>PVM_EpiEffBandwidth</code
 the scan.</li>
 <li><strong>DTI</strong>: weighted log-linear tensor fit on b ≤ 1000 s/mm² using the scanner's effective b-matrices
 (<code>PVM_DwBMat</code>); FA/MD medians over the brain core (whole brain, not white matter).</li>
-<li><strong>Field maps</strong>: SD/IQR of ΔB0 over the brain after removing the median. <strong>Spectroscopy</strong>: FWHM of
+<li><strong>Field maps</strong>: SD/IQR of ΔB0 over the brain after removing the median. ParaVision zeroes the map outside the
+object; zeros enclosed by the object are real on-resonance values and are kept. <strong>Spectroscopy</strong>: FWHM of
 the unsuppressed water peak (group delay removed, zero-order phased).</li>
+<li><strong>Roles</strong>: a single-volume EPI counts as a topup reference only if it is spin echo
+(<code>VisuAcqEchoSequenceType</code>) or acquired with reversed phase encoding; other single-volume EPIs are listed
+separately. QC reads <code>pdata/1</code> (field maps: the reconstruction in Hz) unless <code>--proc</code> says otherwise.</li>
 <li><strong>Not assessed</strong>: motion correction, slice-timing, registration accuracy to an atlas, physiological recordings.
 Single subject, single session: differences of a few percent are within measurement noise.</li>
 </ul>
@@ -640,10 +666,12 @@ def build_html(info: Dict[str, str], scans: List[Scan], out: Dict[str, Any], not
         add('dwi', ROLES['dwi'], sec_dwi(res['dwi']))
     if res['epi_ref']:
         add('seepi', ROLES['epi_ref'], sec_epi_ref(res['epi_ref']))
+    if res.get('epi_single'):
+        add('epi1', ROLES['epi_single'], sec_epi_ref(res['epi_single'], pairs=False))
     if res['bold']:
         add('bold', ROLES['bold'], sec_bold(res['bold']))
     epi = [(ROLES[r_][: ROLES[r_].find(' (') if ' (' in ROLES[r_] else None], r)
-           for r_ in ('dwi', 'epi_ref', 'bold') for r in res[r_]]
+           for r_ in ('dwi', 'epi_ref', 'epi_single', 'bold') for r in res.get(r_, [])]
     add('geometry', 'EPI geometry across protocols', sec_geometry(epi))
     add('shim', 'Shim: field maps and water linewidth', sec_fieldmap_mrs(res['fieldmap'], res['mrs'], ref))
     add('methods', 'Methods', METHODS_HTML)
