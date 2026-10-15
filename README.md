@@ -38,7 +38,9 @@ Optional, for `imagej` and `install-imagej`: ImageJ 1.47+ or Fiji, installed
 separately (it is an application, not a Python package, so pip does not pull
 it in). The macro itself runs on any OS with no other dependencies.
 
-Runs on native Linux, WSL and macOS. The interactive viewer needs a
+Runs on native Linux, WSL and macOS. On Windows, use it inside WSL2: native
+Windows is not supported or tested. Under WSL the Windows ImageJ/Fiji is still
+found and used. The interactive viewer needs a
 matplotlib GUI backend: on a bare Linux install add one with
 `apt install python3-tk` (or `pip install PyQt5`) -- without it `show` says so
 instead of opening nothing, and `--save` still works.
