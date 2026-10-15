@@ -189,6 +189,20 @@ def cmd_install_imagej(args):
     print(f'installed {dest}\nRestart ImageJ: the command appears as Plugins > Import Bruker 2dseq')
 
 
+def cmd_qc(args):
+    try:
+        from .qc import run_qc
+    except ImportError as e:  # scipy/nibabel missing
+        sys.exit(f'brukerview qc needs the qc extra ({e}); install with: pip install "brukerview[qc]"')
+    study = Path(args.path).expanduser().resolve()
+    out = Path(args.output) if args.output else Path.cwd() / f'qc_{study.name}'
+    path = run_qc(study, out, reference=args.reference,
+                  brain_mask=Path(args.brain_mask) if args.brain_mask else None,
+                  use_bet=not args.no_bet, scans=args.scans,
+                  notes=Path(args.notes) if args.notes else None)
+    print(f'report: {path}')
+
+
 # ---- parser --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='brukerview',
@@ -246,6 +260,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--no-bc', action='store_true', help='do not open the Brightness/Contrast panel')
     sp.set_defaults(func=cmd_imagej)
 
+    sp = sub.add_parser('qc', help='acquisition QA/QC report for a study (needs the [qc] extra)')
+    sp.add_argument('path', help='study directory (the folder holding the numbered scans)')
+    sp.add_argument('-o', '--output', help='output folder (default: ./qc_<study name>)')
+    sp.add_argument('--reference', type=int, metavar='SCAN',
+                    help='anatomical scan for the brain mask (default: finest 3-D RARE)')
+    sp.add_argument('--brain-mask', metavar='NIFTI', help='use this brain mask instead of computing one')
+    sp.add_argument('--no-bet', action='store_true', help='do not use FSL bet2 for the mask hull')
+    sp.add_argument('--scans', type=int, nargs='+', metavar='N', help='only analyse these scans')
+    sp.add_argument('--notes', metavar='MD', help='markdown file shown in the report summary')
+    sp.set_defaults(func=cmd_qc)
+
     sp = sub.add_parser('install-imagej', help='copy the macro into ImageJ/plugins')
     sp.add_argument('imagej_dir', nargs='?', help='ImageJ or Fiji folder (auto-detected if omitted)')
     sp.set_defaults(func=cmd_install_imagej)
@@ -255,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    known = {'list', 'show', 'info', 'nifti', 'fsleyes', 'imagej', 'install-imagej'}
+    known = {'list', 'show', 'info', 'nifti', 'fsleyes', 'imagej', 'qc', 'install-imagej'}
     if argv and argv[0] not in known and not argv[0].startswith('-'):
         # `brukerview PATH` -> list for a study, show for a scan
         p = Path(argv[0]).expanduser()
