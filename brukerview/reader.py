@@ -233,15 +233,25 @@ class BrukerImage:
         return [f'{group.label} {i + 1}/{n}' for i in range(n)]
 
     # ---- data --------------------------------------------------------------
-    def _frame_scaling(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _per_frame(self, key: str, default: float) -> np.ndarray:
+        """A per-frame scaling vector, by the rule the ImageJ macro also uses:
+        one value for all frames, one per frame, or one per slice (repeated
+        across the other frame groups). Any other length is refused."""
         n = self.frame_count
-        slope = np.atleast_1d(np.asarray(self.visu.get('VisuCoreDataSlope', [1.0]), dtype=np.float64))
-        offs = np.atleast_1d(np.asarray(self.visu.get('VisuCoreDataOffs', [0.0]), dtype=np.float64))
-        if slope.size == 1:
-            slope = np.repeat(slope, n)
-        if offs.size == 1:
-            offs = np.repeat(offs, n)
-        return slope[:n], offs[:n]
+        v = np.atleast_1d(np.asarray(self.visu.get(key, [default]), dtype=np.float64))
+        if v.size == 1:
+            return np.repeat(v, n)
+        if v.size >= n:
+            return v[:n]
+        i = self.slice_group_index
+        if i is not None and v.size == self.frame_groups[i].size:
+            stride = int(np.prod([g.size for g in self.frame_groups[:i]])) if i else 1
+            return v[(np.arange(n) // stride) % v.size]
+        raise ValueError(f'{self.pdata_dir}: {key} has {v.size} values for {n} frames '
+                         f'(expected 1, one per frame, or one per slice)')
+
+    def _frame_scaling(self) -> Tuple[np.ndarray, np.ndarray]:
+        return self._per_frame('VisuCoreDataSlope', 1.0), self._per_frame('VisuCoreDataOffs', 0.0)
 
     @property
     def uniform_scaling(self) -> bool:
@@ -299,11 +309,19 @@ class BrukerImage:
             else:
                 data = data[:, :, np.newaxis]
 
-        if str(self.visu.get('VisuCoreDiskSliceOrder', '')) == 'disk_reverse_slice_order':
+        if self.reversed_slices:
             data = data[:, :, ::-1]
         return data
 
     # ---- world geometry ------------------------------------------------------
+    @property
+    def reversed_slices(self) -> bool:
+        """True when slices are stored last-first (``disk_reverse_slice_order``).
+        PV360 writes the value as a one-element array, older versions as a scalar."""
+        v = self.visu.get('VisuCoreDiskSliceOrder', '')
+        v = v[0] if isinstance(v, (list, tuple)) and v else v
+        return str(v) == 'disk_reverse_slice_order'
+
     def affine(self) -> np.ndarray:
         """Index-to-world (mm, Bruker/DICOM patient LPS-style) 4x4 affine."""
         orient = np.asarray(self.visu.get('VisuCoreOrientation', np.eye(3).ravel()), dtype=float).reshape(-1, 3, 3)
@@ -330,6 +348,11 @@ class BrukerImage:
         aff[:3, 3] = pos[0] + 0.5 * (aff[:3, 0] + aff[:3, 1])
         if self.dim >= 3:
             aff[:3, 3] += 0.5 * aff[:3, 2]
+        if self.reversed_slices:
+            # load() puts the last stored slice first: move the origin there and
+            # step the other way, so index -> world stays tied to the same voxels.
+            aff[:3, 3] += (self.n_slices - 1) * aff[:3, 2]
+            aff[:3, 2] *= -1
         return aff
 
     def nifti_affine(self) -> np.ndarray:

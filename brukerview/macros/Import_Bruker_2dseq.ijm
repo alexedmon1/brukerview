@@ -94,6 +94,7 @@ function openBruker(pdata, applyScale) {
     if (wordType == "_16BIT_SGN_INT") ijType = "16-bit Signed";
     else if (wordType == "_16BIT_UNSGN_INT") ijType = "16-bit Unsigned";
     else if (wordType == "_8BIT_UNSGN_INT") ijType = "8-bit";
+    else if (wordType == "_8BIT_SGN_INT") ijType = "8-bit";   // made signed after import
     else if (wordType == "_32BIT_SGN_INT") ijType = "32-bit Signed";
     else if (wordType == "_32BIT_UNSGN_INT") ijType = "32-bit Unsigned";
     else if (wordType == "_32BIT_FLOAT") ijType = "32-bit Real";
@@ -105,34 +106,12 @@ function openBruker(pdata, applyScale) {
     if (byteOrder == "littleEndian") opts = opts + " little-endian";
     setBatchMode(true);
     run("Raw...", opts);
-
-    // ---- intensity scaling -------------------------------------------------
-    if (applyScale) {
-        v = visuValue(visu, "VisuCoreDataSlope"); slope = numArray(v);
-        v = visuValue(visu, "VisuCoreDataOffs");  offs = numArray(v);
-        if (slope.length == 0) slope = newArray(1);
-        if (offs.length == 0) offs = newArray(0);
+    if (wordType == "_8BIT_SGN_INT") {
         run("32-bit");
-        sameSlope = bvUniform(slope);
-        sameOffs = bvUniform(offs);
-        if (sameSlope && sameOffs) {
-            if (slope[0] != 1) run("Multiply...", "value=" + slope[0] + " stack");
-            if (offs[0] != 0) run("Add...", "value=" + offs[0] + " stack");
-        } else {
-            for (f = 0; f < frames; f++) {
-                s = slope[minOf(f, slope.length - 1)];
-                o = offs[minOf(f, offs.length - 1)];
-                for (k = 0; k < nz; k++) {
-                    setSlice(f * nz + k + 1);
-                    if (s != 1) run("Multiply...", "value=" + s + " slice");
-                    if (o != 0) run("Add...", "value=" + o + " slice");
-                }
-            }
-            setSlice(1);
-        }
+        run("Macro...", "code=[if (v > 127) v = v - 256;] stack");
     }
 
-    // ---- frame groups -> hyperstack ---------------------------------------------
+    // ---- frame groups (needed for per-slice scaling and slice order) -------------
     // VisuFGOrderDesc lists groups fastest-varying first; ImageJ orders c, z, t.
     gSizes = newArray(0);
     gNames = newArray(0);
@@ -160,6 +139,53 @@ function openBruker(pdata, applyScale) {
         if (dim == 2) gNames[0] = "FG_SLICE"; else gNames[0] = "FG_FRAME";
     }
 
+    // where the slice group sits: frame f is slice floor(f / sliceStride) % nSliceFG
+    sliceSlot = -1;
+    for (i = 0; i < gSizes.length; i++) if (gNames[i] == "FG_SLICE") sliceSlot = i;
+    nSliceFG = 1; sliceStride = 1;
+    if (sliceSlot >= 0) {
+        nSliceFG = gSizes[sliceSlot];
+        for (i = 0; i < sliceSlot; i++) sliceStride = sliceStride * gSizes[i];
+    }
+
+
+    // ---- intensity scaling -------------------------------------------------
+    if (applyScale) {
+        v = visuValue(visu, "VisuCoreDataSlope"); slope = numArray(v);
+        v = visuValue(visu, "VisuCoreDataOffs");  offs = numArray(v);
+        if (slope.length == 0) { slope = newArray(1); slope[0] = 1; }
+        if (offs.length == 0) offs = newArray(1);
+        run("32-bit");
+        sameSlope = bvUniform(slope);
+        sameOffs = bvUniform(offs);
+        if (sameSlope && sameOffs) {
+            // d2s(x, -12): scientific notation with 12 digits. Plain string
+            // conversion keeps ~4 significant digits and would scale by e.g.
+            // 0.04074 instead of 0.04073596 (a 1e-4 error on every pixel).
+            if (slope[0] != 1) run("Multiply...", "value=" + d2s(slope[0], -12) + " stack");
+            if (offs[0] != 0) run("Add...", "value=" + d2s(offs[0], -12) + " stack");
+        } else {
+            for (f = 0; f < frames; f++) {
+                si = scaleIndex(slope.length, f, frames, sliceStride, nSliceFG);
+                oi = scaleIndex(offs.length, f, frames, sliceStride, nSliceFG);
+                s = slope[si];
+                o = offs[oi];
+                for (k = 0; k < nz; k++) {
+                    setSlice(f * nz + k + 1);
+                    if (s != 1) run("Multiply...", "value=" + d2s(s, -12) + " slice");
+                    if (o != 0) run("Add...", "value=" + d2s(o, -12) + " slice");
+                }
+            }
+            setSlice(1);
+        }
+    }
+
+    // ---- slice order: same as the Python reader (last stored slice first) ---------
+    v = visuValue(visu, "VisuCoreDiskSliceOrder");
+    if (indexOf(v, "disk_reverse_slice_order") >= 0) {
+        reverseSlices(dim, frames, nz, sliceStride, nSliceFG);
+    }
+
     // Assign each frame group a hyperstack axis: slices -> z, the first other
     // group -> t, a second other group -> c. "Stack to Hyperstack" takes the
     // input order as a string listing axes fastest-first, which is exactly how
@@ -177,8 +203,6 @@ function openBruker(pdata, applyScale) {
         lab = groupLabel(gNames[0]);
         layout = "" + gSizes[0] + " " + lab;
     } else if (gSizes.length <= 3) {
-        sliceSlot = -1;
-        for (i = 0; i < gSizes.length; i++) if (gNames[i] == "FG_SLICE") sliceSlot = i;
         if (sliceSlot < 0) sliceSlot = 0;
         nC = 1; nZ = 1; nT = 1;
         order = "xy";
@@ -263,6 +287,43 @@ function openBruker(pdata, applyScale) {
 
 // ---------------------------------------------------------------------------
 // Locate a pdata folder from whatever the user pointed at.
+// Index into a VisuCoreDataSlope/Offs vector for frame f: one value for all
+// frames, one per frame, or one per slice repeated across the other groups.
+// Anything else is refused (the Python reader applies the same rule).
+function scaleIndex(n, f, frames, sliceStride, nSliceFG) {
+    if (n == 1) return 0;
+    if (n >= frames) return f;
+    if (n == nSliceFG) {
+        k = floor(f / sliceStride) % nSliceFG;
+        return k;
+    }
+    exit("VisuCoreDataSlope/Offs has " + n + " values for " + frames + " frames\n(expected 1, one per frame, or one per slice)");
+}
+
+// Reorder the plain stack so the last stored slice comes first. 2-D: frames
+// are swapped across the slice group; 3-D: z is reversed inside each frame.
+function reverseSlices(dim, frames, nz, sliceStride, nSliceFG) {
+    if (dim >= 3) { nPer = nz; total = frames * nz; }
+    else { nPer = nSliceFG; total = frames; }
+    if (nPer < 2) return;
+    order = "";
+    for (p = 0; p < total; p++) {
+        if (dim >= 3) {
+            src = p - (p % nz) + (nz - 1 - (p % nz));
+        } else {
+            k = floor(p / sliceStride) % nSliceFG;
+            src = p + (nSliceFG - 1 - 2 * k) * sliceStride;
+        }
+        if (p > 0) order = order + ",";
+        order = order + (src + 1);
+    }
+    id = getImageID();
+    run("Make Substack...", "slices=" + order);
+    sub = getImageID();
+    selectImage(id); close();
+    selectImage(sub);
+}
+
 function resolvePdata(d) {
     ok = isPdata(d);
     if (ok) return d;

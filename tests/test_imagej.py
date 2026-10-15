@@ -1,6 +1,8 @@
 """ImageJ discovery and path translation, on WSL and on native Linux/macOS."""
 from pathlib import Path
 
+import pytest
+
 from brukerview import imagej
 
 
@@ -84,3 +86,38 @@ def test_install_macro(tmp_path):
     exe = make_imagej_dir(tmp_path, 'ImageJ')
     dest = imagej.install_macro(exe.parent)
     assert dest.read_text() == imagej.MACRO_PATH.read_text()
+
+
+def make_fiji_app(root: Path) -> Path:
+    """macOS layout: launcher in Contents/MacOS, plugins at the bundle root."""
+    app = root / 'Fiji.app'
+    (app / 'plugins').mkdir(parents=True)
+    (app / 'Contents' / 'MacOS').mkdir(parents=True)
+    exe = app / 'Contents' / 'MacOS' / 'ImageJ-macosx'
+    exe.write_text('#!/bin/sh\n')
+    return exe
+
+
+def test_fiji_app_bundle_is_found_and_installable(tmp_path):
+    exe = make_fiji_app(tmp_path)
+    assert imagej.find_imagej(str(tmp_path / 'Fiji.app')) == exe   # the bundle folder
+    assert imagej.find_imagej(str(exe)) == exe                       # the launcher itself
+    dest = imagej.install_macro(exe.parent)                          # what install-imagej passes
+    assert dest == tmp_path / 'Fiji.app' / 'plugins' / imagej.MACRO_NAME
+
+
+def test_launch_lets_stderr_through(tmp_path, monkeypatch):
+    exe = make_imagej_dir(tmp_path, 'ImageJ')
+    seen = {}
+    monkeypatch.setattr(imagej.subprocess, 'Popen', lambda cmd, **kw: seen.update(kw))
+    imagej.launch(tmp_path / 'p', exe)
+    assert 'stderr' not in seen and seen['stdin'] is imagej.subprocess.DEVNULL
+
+
+def test_missing_imagej_exits_cleanly(tmp_path, monkeypatch):
+    from test_reader import make_scan
+    from brukerview import cli
+    scan, _ = make_scan(tmp_path)
+    monkeypatch.setattr(imagej, 'find_imagej', lambda explicit=None: None)
+    with pytest.raises(SystemExit, match='ImageJ not found'):
+        cli.main(['imagej', str(scan)])

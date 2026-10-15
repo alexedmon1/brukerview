@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -74,6 +76,15 @@ def _select(path: str, proc: Optional[str], reorient: bool = True) -> Union[Bruk
     if proc is not None and isinstance(img, BrukerImage):
         img = BrukerImage(img.scan_dir / 'pdata' / str(proc))
     return img
+
+
+def _all_images(path: str, all_procs: bool) -> List[Union[BrukerImage, NiftiImage]]:
+    """``--all``: every reconstruction and NIfTI file under a directory, or just
+    the one named when ``path`` is a file (not everything beside it)."""
+    if _target(path).is_file():
+        return [_select(path, None)]
+    images = [i for i in find_images(path, all_procs=all_procs) if i.is_image]
+    return images + find_niftis(path)
 
 
 def _reorient(args) -> bool:
@@ -162,10 +173,17 @@ def cmd_info(args):
 def cmd_nifti(args):
     from .nifti import to_nifti
     if args.all:
-        images = [i for i in find_images(args.path, all_procs=args.all_procs) if i.is_image]
+        images = _all_images(args.path, args.all_procs)
+        if not _target(args.path).is_file():  # a folder: export its Bruker scans, not NIfTIs already there
+            images = [i for i in images if not isinstance(i, NiftiImage)]
     else:
         images = [_select(args.path, args.proc)]
-    out_dir = Path(args.output) if args.output and (len(images) > 1 or Path(args.output).is_dir()) else None
+    # -o is a folder with --all, when it already is one, or when it is not named .nii/.nii.gz
+    out_dir = None
+    if args.output:
+        o = Path(args.output)
+        if args.all or len(images) > 1 or o.is_dir() or not is_nifti_path(o):
+            out_dir = o
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
     for img in images:
@@ -174,6 +192,16 @@ def cmd_nifti(args):
             continue
         out = to_nifti(img, out_dir or args.output, scaled=not args.raw)
         print(out)
+
+
+def _cache_name(img: BrukerImage, raw: bool) -> str:
+    """Cache file for one reconstruction: unique per pdata path and per raw/scaled,
+    readable, and safe as a filename on every OS."""
+    from .nifti import default_name
+    tag = hashlib.sha1(str(img.pdata_dir.resolve()).encode()).hexdigest()[:10]
+    stem = default_name(img).removesuffix('.nii.gz')
+    name = f'{stem}_{"raw" if raw else "scaled"}_{tag}.nii.gz'
+    return re.sub(r'[^A-Za-z0-9._-]', '_', name)
 
 
 def _cache_dir() -> Path:
@@ -187,18 +215,15 @@ def cmd_fsleyes(args):
     exe = shutil.which('fsleyes')
     if not exe:
         sys.exit('fsleyes not found on PATH')
-    if args.all:
-        images = [i for i in find_images(args.path, all_procs=args.all_procs) if i.is_image]
-        images += find_niftis(args.path)
-    else:
-        images = [_select(args.path, args.proc)]
+    images = _all_images(args.path, args.all_procs) if args.all else [_select(args.path, args.proc)]
     files = []
     for img in images:
         if isinstance(img, NiftiImage):
             files.append(str(img.path))
             continue
-        out = _cache_dir() / f'{img.study_id[:20].replace(" ", "_").replace(":", "")}_{default_name(img)}'
-        if not out.exists() or out.stat().st_mtime < img.data_path.stat().st_mtime:
+        out = _cache_dir() / _cache_name(img, raw=args.raw)
+        newest = max(img.data_path.stat().st_mtime, img.visu_path.stat().st_mtime)
+        if not out.exists() or out.stat().st_mtime < newest:
             to_nifti(img, out, scaled=not args.raw)
         files.append(str(out))
     print('fsleyes', *files)
@@ -211,6 +236,8 @@ def cmd_imagej(args):
     if isinstance(img, NiftiImage):
         sys.exit(f'{img.path}: the ImageJ macro imports 2dseq only; try `brukerview show` or `fsleyes`')
     exe = find_imagej(args.imagej)
+    if exe is None:
+        sys.exit('ImageJ not found; pass --imagej /path/to/ImageJ or set BRUKERVIEW_IMAGEJ')
     cmd = launch(img.pdata_dir, exe, raw=args.raw, bc=not args.no_bc)
     print(' '.join(cmd))
 

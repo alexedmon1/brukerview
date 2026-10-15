@@ -12,6 +12,7 @@ brukerview keeps working without it.
 from __future__ import annotations
 
 import re
+import sys
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -44,6 +45,15 @@ def _nibabel():
     return nibabel
 
 
+def _read_errors() -> tuple:
+    """Exceptions that mean "this file is not a readable NIfTI" (skip it), as
+    opposed to bugs, which should surface."""
+    _nibabel()  # clear message if nibabel is missing
+    from nibabel.filebasedimages import ImageFileError
+    from nibabel.spatialimages import HeaderDataError
+    return (OSError, EOFError, ValueError, ImageFileError, HeaderDataError)
+
+
 def is_nifti_path(path: Union[str, Path]) -> bool:
     return Path(path).name.lower().endswith(NIFTI_SUFFIXES)
 
@@ -62,10 +72,9 @@ class NiftiImage:
         axis order, which is what you want when checking how data is stored.
     """
 
-    method_params: Dict[str, Any] = {}
-
     def __init__(self, path: Union[str, Path], reorient: bool = True):
         nib = _nibabel()
+        self.method_params: Dict[str, Any] = {}  # no method file; per instance, never shared
         self.path = Path(path).expanduser()
         if not self.path.exists():
             raise FileNotFoundError(self.path)
@@ -329,8 +338,9 @@ def find_niftis(path: Union[str, Path], max_depth: int = 2,
             if child.is_file() and is_nifti_path(child):
                 try:
                     found.append(NiftiImage(child, reorient=reorient))
-                except Exception as exc:  # unreadable header: skip, don't abort listing
-                    print(f'warning: skipping {child}: {exc}')
+                except _read_errors() as exc:
+                    # unreadable or truncated file: skip it, don't abort the listing
+                    print(f'warning: skipping {child}: {exc}', file=sys.stderr)
             elif child.is_dir() and depth > 0 and not child.name.startswith('.') and child.name != 'pdata':
                 walk(child, depth - 1)
 

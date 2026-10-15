@@ -55,9 +55,11 @@ def find_imagej(explicit: Optional[str] = None) -> Optional[Path]:
     for c in candidates:
         p = Path(c).expanduser()
         if p.is_dir():
-            for name in ('ImageJ.exe', 'ImageJ-win64.exe', 'ImageJ-linux64', 'ImageJ'):
-                if (p / name).exists():
-                    return p / name
+            # a macOS bundle (Fiji.app) keeps its launcher in Contents/MacOS
+            for d in (p, p / 'Contents' / 'MacOS'):
+                for name in ('ImageJ.exe', 'ImageJ-win64.exe', 'ImageJ-linux64', 'ImageJ-macosx', 'ImageJ'):
+                    if (d / name).is_file():
+                        return d / name
         elif p.exists():
             return p
     for name in ('fiji', 'imagej', 'ImageJ'):
@@ -88,16 +90,25 @@ def launch(pdata_dir: Path, exe: Optional[Path] = None, raw: bool = False,
     cmd = [str(exe), '-macro', _host_path(MACRO_PATH, exe), arg]
     # stdin must not be inherited: a Windows JVM started from WSL blocks on it.
     # The ImageJ.exe launcher also needs its own folder as the working directory.
+    # stderr is inherited so a failing launch says why.
     subprocess.Popen(cmd, cwd=str(exe.parent), stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+                     stdout=subprocess.DEVNULL, start_new_session=True)
     return cmd
+
+
+def plugins_dir(start: Path) -> Optional[Path]:
+    """The ``plugins`` folder of the install holding ``start`` (the launcher's
+    folder, or a directory above it: Fiji.app/Contents/MacOS -> Fiji.app/plugins)."""
+    for d in [start, *start.parents][:4]:
+        if (d / 'plugins').is_dir():
+            return d / 'plugins'
+    return None
 
 
 def install_macro(imagej_dir: Path) -> Path:
     """Copy the macro into ``<ImageJ>/plugins`` so it appears in the Plugins menu."""
-    plugins = imagej_dir / 'plugins'
-    if not plugins.is_dir():
+    plugins = plugins_dir(Path(imagej_dir))
+    if plugins is None:
         raise FileNotFoundError(f'{imagej_dir} has no plugins folder; is it an ImageJ/Fiji install?')
     dest = plugins / MACRO_NAME
     shutil.copyfile(MACRO_PATH, dest)

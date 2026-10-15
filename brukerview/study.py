@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -76,8 +77,8 @@ def find_images(path: Union[str, Path], all_procs: bool = False) -> List[BrukerI
             for p in (procs if all_procs else procs[:1]):
                 try:
                     images.append(BrukerImage(p))
-                except Exception as exc:  # unreadable visu_pars: skip, don't abort listing
-                    print(f'warning: skipping {p}: {exc}')
+                except (OSError, ValueError) as exc:  # unreadable visu_pars: skip, don't abort listing
+                    print(f'warning: skipping {p}: {exc}', file=sys.stderr)
     return images
 
 

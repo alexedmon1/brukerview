@@ -189,3 +189,30 @@ def test_cli_imagej_refuses_nifti(tmp_path):
     path, _, _ = make_las(tmp_path)
     with pytest.raises(SystemExit, match='2dseq'):
         main(['imagej', str(path)])
+
+
+@pytest.mark.parametrize('affine', [
+    # cyclic permutation (a permutation that is not its own inverse) and a swap
+    np.array([[0, 0, -1, 0], [1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 0, 1.]]),
+    np.array([[0, -1, 0, 0], [-1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1.]]),
+])
+def test_permuted_axes_size_matches_loaded_array(tmp_path, affine):
+    data = np.random.default_rng(0).random((10, 20, 30)).astype(np.float32)
+    img = NiftiImage(write_nifti(tmp_path / 'perm.nii.gz', data, affine))
+    assert tuple(img.size) == img.load().shape[:3] == img.shape[:3]
+    assert img.n_slices == img.load().shape[2]
+
+
+def test_method_params_not_shared(tmp_path):
+    a = NiftiImage(make_las(tmp_path, 'a.nii.gz')[0])
+    b = NiftiImage(make_las(tmp_path, 'b.nii.gz')[0])
+    a.method_params['x'] = 1
+    assert b.method_params == {}
+
+
+def test_unreadable_nifti_is_skipped_with_warning(tmp_path, capsys):
+    make_las(tmp_path, 'good.nii.gz')
+    (tmp_path / 'bad.nii.gz').write_bytes(b'not a nifti')
+    found = find_niftis(tmp_path)
+    assert [f.path.name for f in found] == ['good.nii.gz']
+    assert 'skipping' in capsys.readouterr().err
