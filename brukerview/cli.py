@@ -84,16 +84,23 @@ def cmd_show(args):
     img = _select(args.path, args.proc)
     if not img.is_image:
         sys.exit(f'{img.pdata_dir}: not an image (VisuCoreDim={img.dim}); spectroscopy is not supported')
-    if args.save:
+    if args.save or args.movie:
         import matplotlib
         matplotlib.use('Agg')
     from .viewer import SliceViewer
-    v = SliceViewer(img, scaled=not args.raw, cmap=args.cmap,
-                    vrange=tuple(args.range) if args.range else None)
+    try:
+        v = SliceViewer(img, scaled=not args.raw, cmap=args.cmap,
+                        vrange=tuple(args.range) if args.range else None,
+                        fps=args.fps, movie_dim=args.movie_dim)
+    except ValueError as e:
+        sys.exit(str(e))
     if args.slice is not None:
         v._set_index(0, args.slice - 1)
     if args.frame is not None and len(v.idx) > 1:
         v._set_index(1, args.frame - 1)
+    if args.movie:
+        print(v.save_movie(args.movie))
+        return
     if args.save:
         if args.montage:
             v.show_montage()
@@ -104,6 +111,8 @@ def cmd_show(args):
         return
     if args.montage:
         v.show_montage()
+    if args.play:
+        v.toggle_play()
     v.run()
 
 
@@ -231,6 +240,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument('--frame', type=int, help='initial index of the 4th dimension (1-based)')
     sp.add_argument('--montage', action='store_true', help='also open a montage of all slices')
     sp.add_argument('--save', metavar='PNG', help='write a snapshot instead of opening a window')
+    sp.add_argument('--play', action='store_true', help='start playing the movie (space toggles)')
+    sp.add_argument('--fps', type=float, default=10.0, help='movie frames per second (default 10)')
+    sp.add_argument('--movie-dim', metavar='DIM',
+                    help='dimension to play: slice, echo, diffusion, cycle, or time '
+                         '(default: the longest non-slice dimension, else slices)')
+    sp.add_argument('--movie', metavar='OUT',
+                    help='write the movie to OUT (.gif, or .mp4 with ffmpeg) instead of opening a window')
     sp.set_defaults(func=cmd_show)
 
     sp = sub.add_parser('info', help='key parameters of one reconstruction')

@@ -51,7 +51,21 @@ brukerview info ... --param PVM_SpatResol VisuCoreOrientation
 Viewer keys: up/down or mouse wheel for slices, left/right for the next
 dimension (echo, diffusion direction, time point), `[`/`]` for a third,
 right-drag for window/level, `a` auto-contrast, `r` reset, `m` montage of all
-slices, `h` help, `q` close. `--save out.png` writes a snapshot without a window.
+slices, `space` play/pause a movie, `d` choose what the movie steps through
+(slice, echo, diffusion direction, time), `+`/`-` faster/slower, `h` help,
+`q` close. `--save out.png` writes a snapshot without a window.
+
+Movies loop through one dimension while the others stay where they are. The
+default is the longest non-slice dimension: time for BOLD, directions for DTI,
+echoes for MSME. Images with no other dimension play through their slices.
+
+```bash
+brukerview show .../60 --play                         # open and start playing
+brukerview show .../60 --play --fps 20 --movie-dim slice
+brukerview show .../60 --slice 5 --movie bold.gif     # write a GIF, no window
+brukerview show .../13 --slice 6 --movie dti.mp4      # MP4 needs ffmpeg on PATH
+```
+
 ## Acquisition QA/QC report
 
 `brukerview qc` measures image quality for every scan of a study and writes a
