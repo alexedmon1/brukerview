@@ -29,6 +29,9 @@ brukerview keys
   r                   reset contrast to full range
   i                   invert colormap
   m                   montage of all slices (new window)
+  space               play / pause movie
+  d                   movie dimension (slice / echo / diffusion / time)
+  + / -               movie faster / slower
   h                   print this help
   s                   save figure (matplotlib)
   q                   close
@@ -60,9 +63,13 @@ def montage_array(vol: np.ndarray, cols: Optional[int] = None) -> np.ndarray:
     return out
 
 
+TIME_NAMES = ('cycle', 'movie', 'repetition', 'frame')
+
+
 class SliceViewer:
     def __init__(self, img: BrukerImage, scaled: bool = True, cmap: str = 'gray',
-                 vrange: Optional[Tuple[float, float]] = None):
+                 vrange: Optional[Tuple[float, float]] = None, fps: float = 10.0,
+                 movie_dim: Optional[str] = None):
         import matplotlib.pyplot as plt
         from matplotlib.widgets import Slider
 
@@ -113,6 +120,13 @@ class SliceViewer:
             s.on_changed(lambda val, d=d: self._set_index(d, int(val) - 1, from_slider=True))
             self.sliders[d] = s
 
+        # movie playback: a timer steps one dimension and wraps around
+        self.fps = float(fps)
+        self.movie_dim = self.resolve_dim(movie_dim) if movie_dim else self.default_movie_dim()
+        self.playing = False
+        self._timer = self.fig.canvas.new_timer(interval=self._interval())
+        self._timer.add_callback(self._tick)
+
         self.fig.canvas.mpl_connect('key_press_event', self._on_key)
         self.fig.canvas.mpl_connect('scroll_event', self._on_scroll)
         self.fig.canvas.mpl_connect('button_press_event', self._on_press)
@@ -122,9 +136,14 @@ class SliceViewer:
         self._update()
 
     # ---- data access ---------------------------------------------------------
-    def _plane(self) -> np.ndarray:
-        sel = (slice(None), slice(None), *self.idx)
+    def _plane(self, idx: Optional[Sequence[int]] = None) -> np.ndarray:
+        sel = (slice(None), slice(None), *(self.idx if idx is None else idx))
         return self.data[sel].T
+
+    def _title_text(self, idx: Sequence[int]) -> str:
+        parts = [self.img.title]
+        parts += [self.dim_labels[d][idx[d]] for d in range(len(idx)) if self.data.shape[2 + d] > 1]
+        return '   '.join(parts)
 
     def _format_coord(self, x, y) -> str:
         xi, yi = int(round(x)), int(round(y))
@@ -152,10 +171,10 @@ class SliceViewer:
     def _update(self):
         self.im.set_data(self._plane())
         self.im.set_clim(self.lo, self.hi)
-        parts = [self.img.title]
-        parts += [self.dim_labels[d][self.idx[d]] for d in range(len(self.idx)) if self.data.shape[2 + d] > 1]
-        parts.append(f'[{self.lo:.4g}, {self.hi:.4g}]')
-        self.title.set_text('   '.join(parts))
+        text = f'{self._title_text(self.idx)}   [{self.lo:.4g}, {self.hi:.4g}]'
+        if self.playing:
+            text += f'   \u25b6 {self.dim_names[self.movie_dim]} {self.fps:g} fps'
+        self.title.set_text(text)
         self.fig.canvas.draw_idle()
 
     # ---- events -------------------------------------------------------------------
@@ -183,6 +202,14 @@ class SliceViewer:
             self.fig.canvas.draw_idle()
         elif k == 'm':
             self.show_montage()
+        elif k == ' ':
+            self.toggle_play()
+        elif k == 'd':
+            self.cycle_movie_dim()
+        elif k in ('+', '='):
+            self.set_fps(self.fps * 1.5)
+        elif k in ('-', '_'):
+            self.set_fps(self.fps / 1.5)
         elif k == 'h':
             print(HELP)
 
@@ -207,6 +234,99 @@ class SliceViewer:
         level = level0 + (event.y - y0) / 300.0 * span
         self.lo, self.hi = level - width / 2, level + width / 2
         self._update()
+
+    # ---- movie ----------------------------------------------------------------------
+    def movie_dims(self) -> List[int]:
+        """Dimensions that can be played (more than one position)."""
+        return [d for d in range(self.data.ndim - 2) if self.data.shape[2 + d] > 1]
+
+    def default_movie_dim(self) -> int:
+        """The longest non-slice dimension (time, diffusion, echo), else slices."""
+        extra = [d for d in self.movie_dims() if d > 0]
+        if extra:
+            return max(extra, key=lambda d: (self.data.shape[2 + d], -d))
+        return 0
+
+    def resolve_dim(self, name: str) -> int:
+        """Dimension index from a name: 'slice', a frame-group label ('echo',
+        'diffusion', 'cycle', ...) or 'time' for whichever time-like group exists."""
+        key = name.strip().lower()
+        if key == 'time':
+            for d, nm in enumerate(self.dim_names):
+                if nm in TIME_NAMES:
+                    return d
+        elif key in self.dim_names:
+            return self.dim_names.index(key)
+        raise ValueError(f'no {name!r} dimension; this image has: {", ".join(self.dim_names)}')
+
+    def _interval(self) -> int:
+        return max(10, int(round(1000.0 / self.fps)))
+
+    def _tick(self):
+        d = self.movie_dim
+        self._set_index(d, (self.idx[d] + 1) % self.data.shape[2 + d])
+
+    def toggle_play(self):
+        if self.data.shape[2 + self.movie_dim] < 2:
+            print(f'nothing to play: {self.dim_names[self.movie_dim]} has one position')
+            return
+        self.playing = not self.playing
+        (self._timer.start if self.playing else self._timer.stop)()
+        self._update()
+
+    def set_fps(self, fps: float):
+        self.fps = float(min(max(fps, 0.5), 60.0))
+        self._timer.interval = self._interval()
+        self._update()
+
+    def cycle_movie_dim(self):
+        dims = self.movie_dims()
+        if not dims:
+            return
+        i = dims.index(self.movie_dim) if self.movie_dim in dims else -1
+        self.movie_dim = dims[(i + 1) % len(dims)]
+        print(f'movie dimension: {self.dim_names[self.movie_dim]}')
+        self._update()
+
+    def save_movie(self, path: str, dim: Optional[str] = None, fps: Optional[float] = None, dpi: int = 100) -> str:
+        """Write the movie dimension (at the current position of the others) to
+        ``.gif`` (Pillow) or ``.mp4``/``.mov``/``.avi``/``.mkv`` (needs ffmpeg)."""
+        import matplotlib.animation as animation
+        from pathlib import Path
+
+        d = self.resolve_dim(dim) if dim else self.movie_dim
+        fps = float(fps or self.fps)
+        suffix = Path(path).suffix.lower()
+        if suffix == '.gif':
+            writer = animation.PillowWriter(fps=fps)
+        elif suffix in ('.mp4', '.mov', '.avi', '.mkv'):
+            if not animation.writers.is_available('ffmpeg'):
+                raise SystemExit(f'{suffix} needs ffmpeg on PATH; use a .gif instead')
+            writer = animation.FFMpegWriter(fps=fps)
+        else:
+            raise SystemExit(f'unsupported movie format {suffix!r}: use .gif or .mp4')
+
+        idx = list(self.idx)
+        dx, dy, _ = self.img.spacing
+        nx, ny = self.data.shape[:2]
+        height = 6.0 * (ny * dy) / (nx * dx)
+        fig = self.plt.figure(figsize=(6.0, height + 0.45))
+        ax = fig.add_axes([0, 0, 1, height / (height + 0.45)])
+        ax.set_axis_off()
+        im = ax.imshow(self._plane(idx), cmap=self.im.get_cmap(), vmin=self.lo, vmax=self.hi,
+                       aspect=dy / dx, interpolation='nearest', origin='upper')
+        title = fig.text(0.5, 0.99, '', ha='center', va='top', fontsize=8)
+
+        def draw(i):
+            idx[d] = i
+            im.set_data(self._plane(idx))
+            title.set_text(self._title_text(idx))
+            return im, title
+
+        anim = animation.FuncAnimation(fig, draw, frames=self.data.shape[2 + d], blit=False)
+        anim.save(str(path), writer=writer, dpi=dpi)
+        self.plt.close(fig)
+        return str(path)
 
     # ---- extras -------------------------------------------------------------------
     def show_montage(self):

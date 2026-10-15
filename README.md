@@ -87,7 +87,55 @@ repetition time. `--raw` skips `scl_slope`/`scl_inter` the way it skips
 Viewer keys: up/down or mouse wheel for slices, left/right for the next
 dimension (echo, diffusion direction, time point), `[`/`]` for a third,
 right-drag for window/level, `a` auto-contrast, `r` reset, `m` montage of all
-slices, `h` help, `q` close. `--save out.png` writes a snapshot without a window.
+slices, `space` play/pause a movie, `d` choose what the movie steps through
+(slice, echo, diffusion direction, time), `+`/`-` faster/slower, `h` help,
+`q` close. `--save out.png` writes a snapshot without a window.
+
+Movies loop through one dimension while the others stay where they are. The
+default is the longest non-slice dimension: time for BOLD, directions for DTI,
+echoes for MSME. Images with no other dimension play through their slices.
+
+```bash
+brukerview show .../60 --play                         # open and start playing
+brukerview show .../60 --play --fps 20 --movie-dim slice
+brukerview show .../60 --slice 5 --movie bold.gif     # write a GIF, no window
+brukerview show .../13 --slice 6 --movie dti.mp4      # MP4 needs ffmpeg on PATH
+```
+
+## Acquisition QA/QC report
+
+`brukerview qc` measures image quality for every scan of a study and writes a
+self-contained HTML report for comparing protocols, for example in a pilot
+session where parameters are being tuned.
+
+```bash
+uv tool install --editable /path/to/brukerview --with nibabel --with scipy
+# or: pip install -e '/path/to/brukerview[qc]'
+
+brukerview qc /path/to/STUDY_FOLDER -o qc_out/
+brukerview qc STUDY -o qc_out/ --notes interpretation.md   # your own notes in the summary
+brukerview qc STUDY -o qc_out/ --brain-mask edited_mask.nii.gz
+```
+
+It writes `report.html` (tables, interactive SVG charts with hover values,
+image montages, methods), `qc_metrics.tsv` (one row per analysed scan),
+`parameters.tsv` (every scan's protocol parameters) and `brain_mask.nii.gz`.
+
+| Scans | Metrics |
+|---|---|
+| all | role (anatomical / DWI / SE-EPI reference / BOLD / field map / MRS / localizer / EPI adjustment), protocol parameters with the differing ones highlighted |
+| anatomical | SNR, CSF–tissue CNR, SNR per √min and per nL·√min |
+| DTI-EPI | single-image SNR per shell (two-repetition difference method), FA/MD (tensor fit on b ≤ 1000) |
+| BOLD | tSNR (detrended), single-image SNR (consecutive-volume difference), tSNR per √TR<sub>vol</sub> and per nL, drift, steady state; slice-thickness sweeps are detected and plotted |
+| all EPI | Nyquist/segment ghost %, brain coverage, displacement predicted from the B0 map (Δf·FOV<sub>PE</sub>/`PVM_EpiEffBandwidth`) |
+| field maps / PRESS | ΔB0 spread in the brain; water linewidth |
+
+The brain mask comes from the finest 3-D RARE (FSL `bet2` hull plus intensity
+refinement; `--no-bet` skips FSL). It is moved into every other scan through
+the `visu_pars` geometry, with no registration. Noise comes from repeated
+acquisitions where they exist. Otherwise it comes from air around the head or,
+in a tight FOV, from air pockets inside it, and only when that region's
+mean/SD shows it contains pure noise. See the report's Methods section.
 
 ## ImageJ macro
 

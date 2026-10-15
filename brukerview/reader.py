@@ -223,8 +223,13 @@ class BrukerImage:
             comments = self.visu.get('VisuFGElemComment')
             if isinstance(comments, list) and len(comments) == n:
                 return [str(c) for c in comments]
-        if group.name in ('FG_MOVIE', 'FG_CYCLE') and self.repetition_time:
-            return [f't = {i * self.repetition_time / 1000.0:.2f} s' for i in range(n)]
+        if group.name in ('FG_MOVIE', 'FG_CYCLE'):
+            # Time per repetition = scan time / repetitions. The TR alone is wrong for
+            # segmented EPI (one TR per shot) and multi-slice/multi-echo trains.
+            step = self.scan_time_s / n if self.scan_time_s else (
+                self.repetition_time / 1000.0 if self.repetition_time else None)
+            if step:
+                return [f't = {i * step:.2f} s' for i in range(n)]
         return [f'{group.label} {i + 1}/{n}' for i in range(n)]
 
     # ---- data --------------------------------------------------------------
